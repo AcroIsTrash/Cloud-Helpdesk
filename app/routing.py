@@ -5,6 +5,7 @@
 `reason` and `confidence` fields are logged to the audit trail, so an AI
 router's decisions stay explainable and reviewable.
 """
+
 from __future__ import annotations
 
 import re
@@ -27,14 +28,56 @@ class Router(Protocol):
 
 
 KEYWORDS: dict[Category, list[str]] = {
-    Category.NETWORK: ["vpn", "wifi", "wi-fi", "network", "internet", "dns",
-                       "ethernet", "latency", "firewall", "disconnect", "drops"],
-    Category.ACCESS: ["password", "locked out", "login", "log in", "mfa", "2fa",
-                      "permission", "permissions", "account", "sso"],
-    Category.HARDWARE: ["laptop", "monitor", "printer", "keyboard", "mouse",
-                        "dock", "docking", "battery", "screen", "headset"],
-    Category.SOFTWARE: ["install", "outlook", "excel", "teams", "crash", "crashes",
-                        "crashing", "error", "update", "license", "application"],
+    Category.NETWORK: [
+        "vpn",
+        "wifi",
+        "wi-fi",
+        "network",
+        "internet",
+        "dns",
+        "ethernet",
+        "latency",
+        "firewall",
+        "disconnect",
+        "drops",
+    ],
+    Category.ACCESS: [
+        "password",
+        "locked out",
+        "login",
+        "log in",
+        "mfa",
+        "2fa",
+        "permission",
+        "permissions",
+        "account",
+        "sso",
+    ],
+    Category.HARDWARE: [
+        "laptop",
+        "monitor",
+        "printer",
+        "keyboard",
+        "mouse",
+        "dock",
+        "docking",
+        "battery",
+        "screen",
+        "headset",
+    ],
+    Category.SOFTWARE: [
+        "install",
+        "outlook",
+        "excel",
+        "teams",
+        "crash",
+        "crashes",
+        "crashing",
+        "error",
+        "update",
+        "license",
+        "application",
+    ],
 }
 
 
@@ -49,8 +92,9 @@ class KeywordRouter:
         }
         best = max(hits, key=lambda c: len(hits[c]))
         if not hits[best]:
-            return RoutingDecision(Category.OTHER, TRIAGE_QUEUE,
-                                   "no keyword match; sent to triage", 0.0)
+            return RoutingDecision(
+                Category.OTHER, TRIAGE_QUEUE, "no keyword match; sent to triage", 0.0
+            )
         total = sum(len(v) for v in hits.values())
         return RoutingDecision(
             category=best,

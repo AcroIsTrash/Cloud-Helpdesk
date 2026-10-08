@@ -2,6 +2,7 @@
 
 Run:  uv run python -m uvicorn app.main:app --reload
 """
+
 from __future__ import annotations
 
 import os
@@ -18,8 +19,15 @@ from pydantic import ValidationError
 from . import services as svc
 from .db import connect, init_db
 from .models import (
-    ALL_QUEUES, PRIORITY_MATRIX, AssignRequest, Category, CommentCreate, Level,
-    Status, TicketCreate, TransitionRequest,
+    ALL_QUEUES,
+    PRIORITY_MATRIX,
+    AssignRequest,
+    Category,
+    CommentCreate,
+    Level,
+    Status,
+    TicketCreate,
+    TransitionRequest,
 )
 from .routing import KeywordRouter
 from .seed import seed_demo
@@ -56,6 +64,7 @@ def get_conn():
 
 # ---- template filters ------------------------------------------------------
 
+
 def _ago(value: str | None) -> str:
     if not value:
         return ""
@@ -90,9 +99,16 @@ templates.env.filters["label"] = lambda v: str(v).replace("_", " ")
 
 # ---- JSON API ----------------------------------------------------------------
 
+
 @app.exception_handler(svc.TicketError)
 async def ticket_error_handler(_: Request, exc: svc.TicketError):
-    code = 404 if isinstance(exc, svc.NotFound) else 403 if isinstance(exc, svc.PermissionDenied) else 400
+    code = (
+        404
+        if isinstance(exc, svc.NotFound)
+        else 403
+        if isinstance(exc, svc.PermissionDenied)
+        else 400
+    )
     return JSONResponse({"detail": str(exc)}, status_code=code)
 
 
@@ -102,11 +118,16 @@ def api_users(conn=Depends(get_conn)):
 
 
 @app.get("/api/tickets", tags=["api"])
-def api_list(status: Status | None = None, include_closed: bool = False,
-             queue: str | None = None, assignee_id: int | None = None,
-             conn=Depends(get_conn)):
-    rows = svc.list_tickets(conn, status=status, include_closed=include_closed,
-                            queue=queue, assignee_id=assignee_id)
+def api_list(
+    status: Status | None = None,
+    include_closed: bool = False,
+    queue: str | None = None,
+    assignee_id: int | None = None,
+    conn=Depends(get_conn),
+):
+    rows = svc.list_tickets(
+        conn, status=status, include_closed=include_closed, queue=queue, assignee_id=assignee_id
+    )
     return [r | {"sla": svc.sla_status(r)} for r in rows]
 
 
@@ -143,6 +164,7 @@ def api_comment(ticket_id: int, body: CommentCreate, conn=Depends(get_conn)):
 # No real auth: an "acting as" switcher stores a user id in a cookie so you can
 # demo the requester and agent views side by side.
 
+
 def current_user(request: Request, conn) -> dict:
     try:
         return svc.get_user(conn, int(request.cookies.get("acting_as", "")))
@@ -152,8 +174,12 @@ def current_user(request: Request, conn) -> dict:
 
 def render(request: Request, conn, name: str, **ctx):
     user = current_user(request, conn)
-    ctx.update(users=svc.list_users(conn), current_user=user, is_agent=svc.is_agent(user),
-               error=request.query_params.get("error"))
+    ctx.update(
+        users=svc.list_users(conn),
+        current_user=user,
+        is_agent=svc.is_agent(user),
+        error=request.query_params.get("error"),
+    )
     return templates.TemplateResponse(request, name, ctx)
 
 
@@ -173,40 +199,69 @@ def act_as(user_id: int = Form(...), next: str = Form("/")):
 
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
-def index(request: Request, status: str = "", queue: str = "", mine: bool = False,
-          conn=Depends(get_conn)):
+def index(
+    request: Request, status: str = "", queue: str = "", mine: bool = False, conn=Depends(get_conn)
+):
     user = current_user(request, conn)
     agent = svc.is_agent(user)
     status_enum = Status(status) if status in {s.value for s in Status} else None
     rows = svc.list_tickets(
-        conn, status=status_enum, include_closed=(status == "all"),
+        conn,
+        status=status_enum,
+        include_closed=(status == "all"),
         queue=queue or None,
         assignee_id=user["id"] if (mine and agent) else None,
         requester_id=None if agent else user["id"],
     )
     for r in rows:
         r["sla"] = svc.sla_status(r)
-    return render(request, conn, "list.html", tickets=rows,
-                  counts=svc.status_counts(conn, None if agent else user["id"]),
-                  statuses=[s.value for s in Status], queues=ALL_QUEUES,
-                  f_status=status, f_queue=queue, mine=mine)
+    return render(
+        request,
+        conn,
+        "list.html",
+        tickets=rows,
+        counts=svc.status_counts(conn, None if agent else user["id"]),
+        statuses=[s.value for s in Status],
+        queues=ALL_QUEUES,
+        f_status=status,
+        f_queue=queue,
+        mine=mine,
+    )
 
 
 @app.get("/tickets/new", response_class=HTMLResponse, include_in_schema=False)
 def new_ticket_form(request: Request, conn=Depends(get_conn)):
-    return render(request, conn, "new.html", levels=[lv.value for lv in Level],
-                  categories=[c.value for c in Category], matrix=PRIORITY_MATRIX,
-                  Level=Level)
+    return render(
+        request,
+        conn,
+        "new.html",
+        levels=[lv.value for lv in Level],
+        categories=[c.value for c in Category],
+        matrix=PRIORITY_MATRIX,
+        Level=Level,
+    )
 
 
 @app.post("/tickets", include_in_schema=False)
-def create_ticket_form(request: Request, title: str = Form(""), description: str = Form(""),
-                       impact: str = Form("medium"), urgency: str = Form("medium"),
-                       category: str = Form(""), conn=Depends(get_conn)):
+def create_ticket_form(
+    request: Request,
+    title: str = Form(""),
+    description: str = Form(""),
+    impact: str = Form("medium"),
+    urgency: str = Form("medium"),
+    category: str = Form(""),
+    conn=Depends(get_conn),
+):
     user = current_user(request, conn)
     try:
-        data = TicketCreate(title=title, description=description, requester_id=user["id"],
-                            impact=impact, urgency=urgency, category=category or None)
+        data = TicketCreate(
+            title=title,
+            description=description,
+            requester_id=user["id"],
+            impact=impact,
+            urgency=urgency,
+            category=category or None,
+        )
     except ValidationError as e:
         first = e.errors()[0]
         return back("/tickets/new", f"{first['loc'][-1]}: {first['msg']}")
@@ -221,26 +276,45 @@ def ticket_page(request: Request, ticket_id: int, conn=Depends(get_conn)):
         detail = svc.ticket_detail(conn, ticket_id, viewer=user)
     except svc.TicketError as e:
         return back("/", e)
-    return render(request, conn, "detail.html", **detail,
-                  next_statuses=[s.value for s in svc.next_statuses(detail["ticket"], user)],
-                  agents=svc.list_users(conn, roles={"agent", "admin"}))
+    return render(
+        request,
+        conn,
+        "detail.html",
+        **detail,
+        next_statuses=[s.value for s in svc.next_statuses(detail["ticket"], user)],
+        agents=svc.list_users(conn, roles={"agent", "admin"}),
+    )
 
 
 @app.post("/tickets/{ticket_id}/comment", include_in_schema=False)
-def comment_form(request: Request, ticket_id: int, body: str = Form(""),
-                 internal: bool = Form(False), conn=Depends(get_conn)):
+def comment_form(
+    request: Request,
+    ticket_id: int,
+    body: str = Form(""),
+    internal: bool = Form(False),
+    conn=Depends(get_conn),
+):
     user = current_user(request, conn)
     try:
-        svc.add_comment(conn, ticket_id, CommentCreate(author_id=user["id"], body=body,
-                                                       internal=internal))
+        svc.add_comment(
+            conn, ticket_id, CommentCreate(author_id=user["id"], body=body, internal=internal)
+        )
     except (svc.TicketError, ValidationError) as e:
-        return back(f"/tickets/{ticket_id}", e if isinstance(e, svc.TicketError) else "comment cannot be empty")
+        return back(
+            f"/tickets/{ticket_id}",
+            e if isinstance(e, svc.TicketError) else "comment cannot be empty",
+        )
     return back(f"/tickets/{ticket_id}")
 
 
 @app.post("/tickets/{ticket_id}/transition", include_in_schema=False)
-def transition_form(request: Request, ticket_id: int, to_status: str = Form(...),
-                    note: str = Form(""), conn=Depends(get_conn)):
+def transition_form(
+    request: Request,
+    ticket_id: int,
+    to_status: str = Form(...),
+    note: str = Form(""),
+    conn=Depends(get_conn),
+):
     user = current_user(request, conn)
     try:
         svc.transition(conn, ticket_id, user["id"], Status(to_status), note)
@@ -250,8 +324,9 @@ def transition_form(request: Request, ticket_id: int, to_status: str = Form(...)
 
 
 @app.post("/tickets/{ticket_id}/assign", include_in_schema=False)
-def assign_form(request: Request, ticket_id: int, assignee_id: str = Form(""),
-                conn=Depends(get_conn)):
+def assign_form(
+    request: Request, ticket_id: int, assignee_id: str = Form(""), conn=Depends(get_conn)
+):
     user = current_user(request, conn)
     try:
         svc.assign(conn, ticket_id, user["id"], int(assignee_id) if assignee_id else None)

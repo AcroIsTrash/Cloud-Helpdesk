@@ -1,4 +1,5 @@
 """SQLite storage. Plain SQL on purpose: the schema *is* the documentation."""
+
 from __future__ import annotations
 
 import sqlite3

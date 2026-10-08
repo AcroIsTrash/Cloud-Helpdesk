@@ -1,15 +1,21 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from app import services as svc
 from app.db import connect, init_db
 from app.models import (
-    Category, CommentCreate, Level, Priority, Status, TicketCreate, compute_priority,
+    Category,
+    CommentCreate,
+    Level,
+    Priority,
+    Status,
+    TicketCreate,
+    compute_priority,
 )
 from app.routing import KeywordRouter, RoutingDecision
 
-T0 = datetime(2026, 1, 5, 9, 0, tzinfo=timezone.utc)
+T0 = datetime(2026, 1, 5, 9, 0, tzinfo=UTC)
 router = KeywordRouter()
 
 
@@ -27,8 +33,16 @@ def ids(conn):
 
 
 def make(conn, ids, **kw):
-    data = dict(title="VPN keeps dropping", description="The VPN disconnects every few minutes.",
-                requester_id=ids["alice"], impact=Level.MEDIUM, urgency=Level.MEDIUM) | kw
+    data = (
+        dict(
+            title="VPN keeps dropping",
+            description="The VPN disconnects every few minutes.",
+            requester_id=ids["alice"],
+            impact=Level.MEDIUM,
+            urgency=Level.MEDIUM,
+        )
+        | kw
+    )
     return svc.create_ticket(conn, TicketCreate(**data), router, T0)
 
 
@@ -38,19 +52,23 @@ def at(minutes):
 
 # ---- priority & routing ----------------------------------------------------
 
+
 def test_priority_matrix():
     assert compute_priority(Level.HIGH, Level.HIGH) == Priority.P1
     assert compute_priority(Level.MEDIUM, Level.HIGH) == Priority.P2
     assert compute_priority(Level.LOW, Level.LOW) == Priority.P4
 
 
-@pytest.mark.parametrize("title,desc,queue", [
-    ("VPN keeps dropping", "disconnects from wifi", "Network Ops"),
-    ("Locked out", "password reset broke my login", "Identity & Access"),
-    ("Monitor flickers", "second screen on the dock flickers", "Desktop Support"),
-    ("Outlook crashes", "error on startup", "Applications"),
-    ("Question", "where is the kitchen", "Service Desk"),
-])
+@pytest.mark.parametrize(
+    "title,desc,queue",
+    [
+        ("VPN keeps dropping", "disconnects from wifi", "Network Ops"),
+        ("Locked out", "password reset broke my login", "Identity & Access"),
+        ("Monitor flickers", "second screen on the dock flickers", "Desktop Support"),
+        ("Outlook crashes", "error on startup", "Applications"),
+        ("Question", "where is the kitchen", "Service Desk"),
+    ],
+)
 def test_keyword_routing(title, desc, queue):
     assert router.route(title, desc).queue == queue
 
@@ -81,8 +99,11 @@ class _StaticRouter:
 
 
 def _create_with(conn, ids, a_router):
-    data = TicketCreate(title="VPN keeps dropping", description="The VPN disconnects every few minutes.",
-                        requester_id=ids["alice"])
+    data = TicketCreate(
+        title="VPN keeps dropping",
+        description="The VPN disconnects every few minutes.",
+        requester_id=ids["alice"],
+    )
     return svc.create_ticket(conn, data, a_router, T0)
 
 
@@ -94,11 +115,14 @@ def test_router_crash_still_creates_ticket_in_triage(conn, ids):
     assert [e["kind"] for e in d["events"]] == ["created", "routing_fallback"]
 
 
-@pytest.mark.parametrize("decision", [
-    RoutingDecision(Category.NETWORK, "Applications", "wrong queue for category", 0.9),
-    RoutingDecision(Category.NETWORK, "Network Ops", "overconfident", 1.7),
-    "network",  # not a RoutingDecision at all
-])
+@pytest.mark.parametrize(
+    "decision",
+    [
+        RoutingDecision(Category.NETWORK, "Applications", "wrong queue for category", 0.9),
+        RoutingDecision(Category.NETWORK, "Network Ops", "overconfident", 1.7),
+        "network",  # not a RoutingDecision at all
+    ],
+)
 def test_router_contract_violations_fall_back_to_triage(conn, ids, decision):
     tid = _create_with(conn, ids, _StaticRouter(decision))
     d = svc.ticket_detail(conn, tid)
@@ -114,6 +138,7 @@ def test_valid_router_decision_is_used_as_is(conn, ids):
 
 
 # ---- lifecycle ---------------------------------------------------------------
+
 
 def test_new_ticket_is_routed_and_audited(conn, ids):
     d = svc.ticket_detail(conn, make(conn, ids))
@@ -155,7 +180,9 @@ def test_requester_permissions(conn, ids):
     with pytest.raises(svc.PermissionDenied):
         svc.transition(conn, tid, ids["alice"], Status.OPEN, now=at(1))
     with pytest.raises(svc.PermissionDenied):
-        svc.add_comment(conn, tid, CommentCreate(author_id=ids["alice"], body="x", internal=True), at(1))
+        svc.add_comment(
+            conn, tid, CommentCreate(author_id=ids["alice"], body="x", internal=True), at(1)
+        )
     with pytest.raises(svc.PermissionDenied):
         svc.add_comment(conn, tid, CommentCreate(author_id=ids["bob"], body="not mine"), at(1))
     with pytest.raises(svc.PermissionDenied):
@@ -172,12 +199,16 @@ def test_requester_can_reopen_then_close(conn, ids):
     svc.transition(conn, tid, ids["sam"], Status.RESOLVED, "Replaced router", at(20))
     svc.transition(conn, tid, ids["alice"], Status.CLOSED, now=at(25))
     with pytest.raises(svc.TicketError, match="closed tickets"):
-        svc.add_comment(conn, tid, CommentCreate(author_id=ids["alice"], body="one more thing"), at(30))
+        svc.add_comment(
+            conn, tid, CommentCreate(author_id=ids["alice"], body="one more thing"), at(30)
+        )
 
 
 def test_internal_notes_hidden_from_requester(conn, ids):
     tid = make(conn, ids)
-    svc.add_comment(conn, tid, CommentCreate(author_id=ids["sam"], body="secret", internal=True), at(1))
+    svc.add_comment(
+        conn, tid, CommentCreate(author_id=ids["sam"], body="secret", internal=True), at(1)
+    )
     svc.add_comment(conn, tid, CommentCreate(author_id=ids["sam"], body="hello"), at(2))
     alice_view = svc.ticket_detail(conn, tid, viewer=svc.get_user(conn, ids["alice"]))
     assert [c["body"] for c in alice_view["comments"]] == ["hello"]
@@ -185,9 +216,12 @@ def test_internal_notes_hidden_from_requester(conn, ids):
 
 # ---- SLA -----------------------------------------------------------------------
 
+
 def test_first_response_ignores_internal_notes(conn, ids):
     tid = make(conn, ids)
-    svc.add_comment(conn, tid, CommentCreate(author_id=ids["sam"], body="note", internal=True), at(5))
+    svc.add_comment(
+        conn, tid, CommentCreate(author_id=ids["sam"], body="note", internal=True), at(5)
+    )
     assert svc.ticket_detail(conn, tid)["ticket"]["first_response_at"] is None
     svc.add_comment(conn, tid, CommentCreate(author_id=ids["sam"], body="On it"), at(30))
     t = svc.ticket_detail(conn, tid)["ticket"]
@@ -232,8 +266,8 @@ def test_pause_cannot_hide_a_breach(conn, ids):
 
     svc.transition(conn, tid, ids["sam"], Status.PENDING, "need logs", at(301))
     res = svc.sla_status(svc.ticket_detail(conn, tid)["ticket"], at(400))["resolution"]
-    assert res["state"] == "breached"      # not masked as "paused"
-    assert res["elapsed_minutes"] == 301   # but the clock did stop
+    assert res["state"] == "breached"  # not masked as "paused"
+    assert res["elapsed_minutes"] == 301  # but the clock did stop
 
     # A ticket paused before it breaches still reports as paused.
     tid2 = make(conn, ids, impact=Level.HIGH, urgency=Level.HIGH)

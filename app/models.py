@@ -3,6 +3,7 @@
 Everything that encodes *policy* (which transitions are legal, how priority is
 derived, how long each priority gets) lives here so it can be read in one place.
 """
+
 from __future__ import annotations
 
 from datetime import timedelta
@@ -12,12 +13,12 @@ from pydantic import BaseModel, Field
 
 
 class Status(str, Enum):
-    NEW = "new"                  # submitted, not yet triaged
-    OPEN = "open"                # triaged / assigned, waiting for work
+    NEW = "new"  # submitted, not yet triaged
+    OPEN = "open"  # triaged / assigned, waiting for work
     IN_PROGRESS = "in_progress"  # an agent is actively working it
-    PENDING = "pending"          # waiting on the requester; SLA clock paused
-    RESOLVED = "resolved"        # fix applied; requester can confirm or reopen
-    CLOSED = "closed"            # terminal
+    PENDING = "pending"  # waiting on the requester; SLA clock paused
+    RESOLVED = "resolved"  # fix applied; requester can confirm or reopen
+    CLOSED = "closed"  # terminal
 
 
 # The ticket lifecycle as a state machine. Anything not listed is illegal.
@@ -95,6 +96,7 @@ ALL_QUEUES = sorted(set(QUEUE_FOR_CATEGORY.values()))
 
 
 # ---- API request schemas -------------------------------------------------
+
 
 class TicketCreate(BaseModel):
     title: str = Field(min_length=5, max_length=120)

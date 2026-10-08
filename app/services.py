@@ -3,11 +3,12 @@
 Every mutation runs in a transaction and writes an audit event, so the
 timeline on a ticket is a complete record of who did what and when.
 """
+
 from __future__ import annotations
 
 import logging
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from .models import (
@@ -46,8 +47,9 @@ class PermissionDenied(TicketError):
 
 # ---- helpers -------------------------------------------------------------
 
+
 def utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _iso(dt: datetime) -> str:
@@ -114,20 +116,27 @@ def _safe_route(router: Router, title: str, description: str) -> tuple[RoutingDe
     try:
         d = router.route(title, description)
     except Exception as exc:  # any router failure must degrade, not crash
-        log.warning("router %s failed; sending ticket to triage", type(router).__name__, exc_info=True)
-        return _triage(f"router failed ({type(exc).__name__}: {str(exc)[:200]}); sent to triage"), True
+        log.warning(
+            "router %s failed; sending ticket to triage", type(router).__name__, exc_info=True
+        )
+        return _triage(
+            f"router failed ({type(exc).__name__}: {str(exc)[:200]}); sent to triage"
+        ), True
 
     if not isinstance(d, RoutingDecision) or not isinstance(d.category, Category):
         return _triage(f"router returned an invalid decision ({d!r:.200}); sent to triage"), True
     if d.queue != QUEUE_FOR_CATEGORY[d.category]:
-        return _triage(f"router sent category {d.category.value} to queue {d.queue!r}, "
-                       f"expected {QUEUE_FOR_CATEGORY[d.category]!r}; sent to triage"), True
+        return _triage(
+            f"router sent category {d.category.value} to queue {d.queue!r}, "
+            f"expected {QUEUE_FOR_CATEGORY[d.category]!r}; sent to triage"
+        ), True
     if not 0.0 <= d.confidence <= 1.0:
         return _triage(f"router confidence {d.confidence!r} outside 0–1; sent to triage"), True
     return d, False
 
 
 # ---- commands ------------------------------------------------------------
+
 
 def create_ticket(conn, data: TicketCreate, router: Router, now: datetime | None = None) -> int:
     now = now or utcnow()
@@ -136,8 +145,9 @@ def create_ticket(conn, data: TicketCreate, router: Router, now: datetime | None
 
     fell_back = False
     if data.category is not None:
-        decision = RoutingDecision(data.category, QUEUE_FOR_CATEGORY[data.category],
-                                   "category chosen by requester", 1.0)
+        decision = RoutingDecision(
+            data.category, QUEUE_FOR_CATEGORY[data.category], "category chosen by requester", 1.0
+        )
     else:
         decision, fell_back = _safe_route(router, data.title, data.description)
 
@@ -146,24 +156,52 @@ def create_ticket(conn, data: TicketCreate, router: Router, now: datetime | None
             """INSERT INTO tickets (title, description, requester_id, queue, category,
                    impact, urgency, priority, status, created_at, updated_at, routing_reason)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (data.title.strip(), data.description.strip(), data.requester_id,
-             decision.queue, decision.category.value, data.impact.value,
-             data.urgency.value, priority.value, Status.NEW.value,
-             _iso(now), _iso(now), decision.reason),
+            (
+                data.title.strip(),
+                data.description.strip(),
+                data.requester_id,
+                decision.queue,
+                decision.category.value,
+                data.impact.value,
+                data.urgency.value,
+                priority.value,
+                Status.NEW.value,
+                _iso(now),
+                _iso(now),
+                decision.reason,
+            ),
         )
         tid = cur.lastrowid
-        _log(conn, tid, data.requester_id, "created",
-             f"Ticket created as {priority.value} (impact {data.impact.value}, "
-             f"urgency {data.urgency.value})", now)
+        _log(
+            conn,
+            tid,
+            data.requester_id,
+            "created",
+            f"Ticket created as {priority.value} (impact {data.impact.value}, "
+            f"urgency {data.urgency.value})",
+            now,
+        )
         # A distinct event kind makes the fallback rate easy to measure.
-        _log(conn, tid, None, "routing_fallback" if fell_back else "routed",
-             f"Routed to {decision.queue} as {decision.category.value}: "
-             f"{decision.reason} (confidence {decision.confidence:.0%})", now)
+        _log(
+            conn,
+            tid,
+            None,
+            "routing_fallback" if fell_back else "routed",
+            f"Routed to {decision.queue} as {decision.category.value}: "
+            f"{decision.reason} (confidence {decision.confidence:.0%})",
+            now,
+        )
     return tid
 
 
-def transition(conn, ticket_id: int, actor_id: int, to_status: Status,
-               note: str | None = None, now: datetime | None = None) -> None:
+def transition(
+    conn,
+    ticket_id: int,
+    actor_id: int,
+    to_status: Status,
+    note: str | None = None,
+    now: datetime | None = None,
+) -> None:
     now = now or utcnow()
     t = _ticket(conn, ticket_id)
     actor = get_user(conn, actor_id)
@@ -195,22 +233,34 @@ def transition(conn, ticket_id: int, actor_id: int, to_status: Status,
     if to_status == Status.CLOSED:
         fields["closed_at"] = _iso(now)
 
-    auto_assign = (to_status == Status.IN_PROGRESS and t["assignee_id"] is None
-                   and is_agent(actor))
+    auto_assign = to_status == Status.IN_PROGRESS and t["assignee_id"] is None and is_agent(actor)
     if auto_assign:
         fields["assignee_id"] = actor_id
 
     with conn:
         _update(conn, ticket_id, now, **fields)
-        _log(conn, ticket_id, actor_id, "status",
-             f"{current.value} → {to_status.value}" + (f": {note}" if note else ""), now)
+        _log(
+            conn,
+            ticket_id,
+            actor_id,
+            "status",
+            f"{current.value} → {to_status.value}" + (f": {note}" if note else ""),
+            now,
+        )
         if auto_assign:
-            _log(conn, ticket_id, actor_id, "assigned",
-                 f"Auto-assigned to {actor['name']} on starting work", now)
+            _log(
+                conn,
+                ticket_id,
+                actor_id,
+                "assigned",
+                f"Auto-assigned to {actor['name']} on starting work",
+                now,
+            )
 
 
-def assign(conn, ticket_id: int, actor_id: int, assignee_id: int | None,
-           now: datetime | None = None) -> None:
+def assign(
+    conn, ticket_id: int, actor_id: int, assignee_id: int | None, now: datetime | None = None
+) -> None:
     now = now or utcnow()
     t = _ticket(conn, ticket_id)
     actor = get_user(conn, actor_id)
@@ -269,12 +319,24 @@ def add_comment(conn, ticket_id: int, data: CommentCreate, now: datetime | None 
         if agent and not data.internal and t["first_response_at"] is None:
             # Internal notes don't count: the SLA measures the *customer's* wait.
             _update(conn, ticket_id, now, first_response_at=_iso(now))
-            _log(conn, ticket_id, author["id"], "first_response",
-                 f"First response by {author['name']}", now)
+            _log(
+                conn,
+                ticket_id,
+                author["id"],
+                "first_response",
+                f"First response by {author['name']}",
+                now,
+            )
         elif not agent and t["status"] == Status.PENDING.value:
             _update(conn, ticket_id, now, status=Status.IN_PROGRESS.value, **_unpause(t, now))
-            _log(conn, ticket_id, author["id"], "status",
-                 "pending → in_progress: requester replied, SLA clock resumed", now)
+            _log(
+                conn,
+                ticket_id,
+                author["id"],
+                "status",
+                "pending → in_progress: requester replied, SLA clock resumed",
+                now,
+            )
         else:
             _update(conn, ticket_id, now)
     return cur.lastrowid
@@ -290,17 +352,25 @@ _TICKET_SELECT = """
 """
 
 
-def list_tickets(conn, status: Status | None = None, include_closed: bool = False,
-                 queue: str | None = None, assignee_id: int | None = None,
-                 requester_id: int | None = None) -> list[dict]:
+def list_tickets(
+    conn,
+    status: Status | None = None,
+    include_closed: bool = False,
+    queue: str | None = None,
+    assignee_id: int | None = None,
+    requester_id: int | None = None,
+) -> list[dict]:
     where, params = [], []
     if status is not None:
         where.append("t.status = ?")
         params.append(status.value)
     elif not include_closed:
         where.append("t.status != 'closed'")
-    for col, val in (("t.queue", queue), ("t.assignee_id", assignee_id),
-                     ("t.requester_id", requester_id)):
+    for col, val in (
+        ("t.queue", queue),
+        ("t.assignee_id", assignee_id),
+        ("t.requester_id", requester_id),
+    ):
         if val is not None:
             where.append(f"{col} = ?")
             params.append(val)
@@ -334,7 +404,8 @@ def ticket_detail(conn, ticket_id: int, viewer: dict | None = None) -> dict:
         for r in conn.execute(
             "SELECT c.*, u.name AS author_name FROM comments c "
             "JOIN users u ON u.id = c.author_id WHERE c.ticket_id = ? ORDER BY c.id",
-            (ticket_id,))
+            (ticket_id,),
+        )
         if show_internal or not r["internal"]
     ]
     events = [
@@ -342,11 +413,17 @@ def ticket_detail(conn, ticket_id: int, viewer: dict | None = None) -> dict:
         for r in conn.execute(
             "SELECT e.*, u.name AS actor_name FROM events e "
             "LEFT JOIN users u ON u.id = e.actor_id WHERE e.ticket_id = ? ORDER BY e.id",
-            (ticket_id,))
+            (ticket_id,),
+        )
     ]
     timeline = sorted(comments + events, key=lambda x: (x["created_at"], x["type"] == "comment"))
-    return {"ticket": ticket, "comments": comments, "events": events,
-            "timeline": timeline, "sla": sla_status(ticket)}
+    return {
+        "ticket": ticket,
+        "comments": comments,
+        "events": events,
+        "timeline": timeline,
+        "sla": sla_status(ticket),
+    }
 
 
 def next_statuses(ticket: dict, viewer: dict) -> list[Status]:
@@ -360,6 +437,7 @@ def next_statuses(ticket: dict, viewer: dict) -> list[Status]:
 
 
 # ---- SLA -----------------------------------------------------------------
+
 
 def _clock(elapsed: timedelta, target: timedelta, done: bool) -> dict:
     ratio = elapsed / target
@@ -398,8 +476,7 @@ def sla_status(t: dict, now: datetime | None = None) -> dict:
     else:
         # Resolving or closing a ticket is itself an answer to the requester.
         answered = responded or resolved or closed
-        response = _clock((answered or now) - created, response_target,
-                          done=answered is not None)
+        response = _clock((answered or now) - created, response_target, done=answered is not None)
 
     if cancelled:
         resolution = {"state": "cancelled"}
@@ -407,8 +484,9 @@ def sla_status(t: dict, now: datetime | None = None) -> dict:
         paused = timedelta(seconds=t["paused_seconds"])
         if t["paused_since"]:
             paused += now - _parse(t["paused_since"])
-        resolution = _clock((resolved or now) - created - paused, resolution_target,
-                            done=resolved is not None)
+        resolution = _clock(
+            (resolved or now) - created - paused, resolution_target, done=resolved is not None
+        )
         if t["paused_since"] and resolution["state"] != "breached":
             # Pausing stops the clock, but it can't un-breach a missed target.
             resolution["state"] = "paused"

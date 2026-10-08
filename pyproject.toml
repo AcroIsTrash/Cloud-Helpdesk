@@ -33,6 +33,8 @@ pythonpath = ["."]
 [tool.ruff]
 target-version = "py313"
 line-length = 100
+# The vendored agent skills are not this project's code.
+extend-exclude = [".claude"]
 
 [tool.ruff.lint]
 # pyflakes, pycodestyle, isort, pyupgrade, bugbear, simplify.
