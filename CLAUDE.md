@@ -31,7 +31,7 @@ it isn't already cloned beside this one.
 ## Status
 
 - [x] Matt Pocock's skills vendored into `.claude/skills/` (see `SOURCE.md` there)
-- [ ] `/setup-matt-pocock-skills` (planned answers: GitHub Issues on this repo; docs in `docs/`)
+- [x] `/setup-matt-pocock-skills` (GitHub Issues on this repo; default triage labels; single-context docs; see `docs/agents/`)
 - [ ] Stack grilled and recorded as ADRs (`/grill-with-docs`)
 - [ ] Phase 1: import app, Postgres + Alembic + auth, docker-compose
 - [ ] Phase 2: Terraform (VPC, ECS Fargate, RDS, ALB) + deploy pipeline
@@ -63,6 +63,20 @@ Update this list when a phase lands.
   outputs.
 - **Reproducible images.** The app is built from this repo's own source at the
   tagged commit; dependencies come from `uv.lock`.
+
+## Agent skills
+
+### Issue tracker
+
+GitHub Issues on `AcroIsTrash/Cloud-Helpdesk`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical labels, unrenamed (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `GLOSSARY.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
 
 ## The stack
 
