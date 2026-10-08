@@ -63,7 +63,7 @@ def _parse(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value) if value else None
 
 
-def _at(value: str) -> datetime:
+def _parse_required(value: str) -> datetime:
     """Parse a timestamp column that is never NULL where it is read."""
     return datetime.fromisoformat(value)
 
@@ -113,7 +113,7 @@ def _update(conn: sqlite3.Connection, ticket_id: int, now: datetime, **fields: A
 
 def _unpause(t: Row, now: datetime) -> Row:
     """Fields that stop the SLA pause clock and bank the paused time."""
-    paused = int((now - _at(t["paused_since"])).total_seconds())
+    paused = int((now - _parse_required(t["paused_since"])).total_seconds())
     return {"paused_seconds": t["paused_seconds"] + paused, "paused_since": None}
 
 
@@ -493,7 +493,7 @@ def sla_status(t: Row, now: datetime | None = None) -> Row:
     """
     now = now or utcnow()
     response_target, resolution_target = SLA_TARGETS[Priority(t["priority"])]
-    created = _at(t["created_at"])
+    created = _parse_required(t["created_at"])
     resolved, closed = _parse(t["resolved_at"]), _parse(t["closed_at"])
     responded = _parse(t["first_response_at"])
     cancelled = closed is not None and resolved is None
@@ -510,7 +510,7 @@ def sla_status(t: Row, now: datetime | None = None) -> Row:
     else:
         paused = timedelta(seconds=t["paused_seconds"])
         if t["paused_since"]:
-            paused += now - _at(t["paused_since"])
+            paused += now - _parse_required(t["paused_since"])
         resolution = _clock(
             (resolved or now) - created - paused, resolution_target, done=resolved is not None
         )

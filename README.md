@@ -128,6 +128,9 @@ GLOSSARY.md     domain terms
   behaviours to test; the base image will use the same one.
 - **`uv.lock` is the only dependency source.** The old `requirements*.txt`
   exports were dropped, so there's nothing to drift out of sync.
+- **Enums stay `class Status(str, Enum)`.** Ruff suggests `StrEnum`, but that
+  changes how members print in f-strings, which is a behaviour change, so the
+  rule is switched off rather than "fixed".
 - **mypy in strict mode.** Typing the import surfaced places where the code
   relied on columns never being NULL (the SLA arithmetic); those are now
   explicit. The fixes were checked by diffing the API and HTML output before

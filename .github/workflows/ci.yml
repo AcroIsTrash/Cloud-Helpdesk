@@ -4,6 +4,10 @@ on:
   push:
   pull_request:
 
+# Checks only read the code; the token gets nothing more.
+permissions:
+  contents: read
+
 # The job names below are what branch protection requires; keep them stable.
 jobs:
   lint:

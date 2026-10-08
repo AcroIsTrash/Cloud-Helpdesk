@@ -47,7 +47,7 @@ ignore = [
 
 [tool.ruff.lint.flake8-bugbear]
 # FastAPI declares parameters as `x: str = Form(...)`; that's its API, not a bug.
-extend-immutable-calls = ["fastapi.Depends", "fastapi.Form", "fastapi.Query", "fastapi.Cookie"]
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Form"]
 
 [tool.mypy]
 python_version = "3.13"

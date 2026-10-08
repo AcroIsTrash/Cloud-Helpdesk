@@ -115,12 +115,12 @@ async def ticket_error_handler(_: Request, exc: svc.TicketError) -> JSONResponse
     return JSONResponse({"detail": str(exc)}, status_code=code)
 
 
-@app.get("/api/users", tags=["api"])
+@app.get("/api/users", tags=["api"], response_model=None)
 def api_users(conn: sqlite3.Connection = Depends(get_conn)) -> list[svc.Row]:
     return svc.list_users(conn)
 
 
-@app.get("/api/tickets", tags=["api"])
+@app.get("/api/tickets", tags=["api"], response_model=None)
 def api_list(
     status: Status | None = None,
     include_closed: bool = False,
@@ -134,18 +134,18 @@ def api_list(
     return [r | {"sla": svc.sla_status(r)} for r in rows]
 
 
-@app.post("/api/tickets", status_code=201, tags=["api"])
+@app.post("/api/tickets", status_code=201, tags=["api"], response_model=None)
 def api_create(body: TicketCreate, conn: sqlite3.Connection = Depends(get_conn)) -> svc.Row:
     tid = svc.create_ticket(conn, body, ROUTER)
     return svc.ticket_detail(conn, tid)
 
 
-@app.get("/api/tickets/{ticket_id}", tags=["api"])
+@app.get("/api/tickets/{ticket_id}", tags=["api"], response_model=None)
 def api_detail(ticket_id: int, conn: sqlite3.Connection = Depends(get_conn)) -> svc.Row:
     return svc.ticket_detail(conn, ticket_id)
 
 
-@app.post("/api/tickets/{ticket_id}/transition", tags=["api"])
+@app.post("/api/tickets/{ticket_id}/transition", tags=["api"], response_model=None)
 def api_transition(
     ticket_id: int, body: TransitionRequest, conn: sqlite3.Connection = Depends(get_conn)
 ) -> svc.Row:
@@ -153,7 +153,7 @@ def api_transition(
     return svc.ticket_detail(conn, ticket_id)
 
 
-@app.post("/api/tickets/{ticket_id}/assign", tags=["api"])
+@app.post("/api/tickets/{ticket_id}/assign", tags=["api"], response_model=None)
 def api_assign(
     ticket_id: int, body: AssignRequest, conn: sqlite3.Connection = Depends(get_conn)
 ) -> svc.Row:
@@ -161,7 +161,7 @@ def api_assign(
     return svc.ticket_detail(conn, ticket_id)
 
 
-@app.post("/api/tickets/{ticket_id}/comments", status_code=201, tags=["api"])
+@app.post("/api/tickets/{ticket_id}/comments", status_code=201, tags=["api"], response_model=None)
 def api_comment(
     ticket_id: int, body: CommentCreate, conn: sqlite3.Connection = Depends(get_conn)
 ) -> svc.Row:
