@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}New ticket{% endblock %}
+{% block content %}
+<style>
+  .form-grid { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 20px; }
+  @media (max-width: 860px) { .form-grid { grid-template-columns: 1fr; } }
+  label.field { display: block; font-weight: 600; font-size: 14px; margin-bottom: 14px; }
+  label.field input, label.field textarea, label.field select { width: 100%; margin-top: 4px; font-weight: 400; }
+  .row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  @media (max-width: 560px) { .row { grid-template-columns: 1fr; } }
+  .hint { font-weight: 400; }
+  .matrix td, .matrix th { padding: 6px 8px; text-align: center; }
+  .matrix { font-size: 13px; }
+  .matrix th { background: var(--panel); }
+</style>
+
+<h1 style="font-size:22px;margin-top:0">New ticket</h1>
+<div class="form-grid">
+<form class="card" method="post" action="/tickets">
+  <label class="field">Title
+    <input type="text" name="title" maxlength="120" placeholder="Short summary, e.g. 'Outlook won't open'" required>
+  </label>
+  <label class="field">Description
+    <textarea name="description" rows="6" placeholder="What happened, what you expected, and anything you've tried" required></textarea>
+  </label>
+  <div class="row">
+    <label class="field">Impact <span class="muted hint">who's affected</span>
+      <select name="impact">{% for l in levels %}<option {% if l == 'medium' %}selected{% endif %}>{{ l }}</option>{% endfor %}</select>
+    </label>
+    <label class="field">Urgency <span class="muted hint">how soon it hurts</span>
+      <select name="urgency">{% for l in levels %}<option {% if l == 'medium' %}selected{% endif %}>{{ l }}</option>{% endfor %}</select>
+    </label>
+    <label class="field">Category
+      <select name="category">
+        <option value="">Auto-route</option>
+        {% for c in categories %}<option>{{ c }}</option>{% endfor %}
+      </select>
+    </label>
+  </div>
+  <p class="muted">Submitting as {{ current_user.name }}.</p>
+  <button>Submit ticket</button>
+</form>
+
+<aside class="card">
+  <h3 style="margin-top:0;font-size:13px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)">How priority is set</h3>
+  <p class="muted">You describe impact and urgency; the system derives priority from this matrix.</p>
+  <table class="matrix">
+    <tr><th>Impact ↓ / Urgency →</th>{% for u in [Level.HIGH, Level.MEDIUM, Level.LOW] %}<th>{{ u.value }}</th>{% endfor %}</tr>
+    {% for i in [Level.HIGH, Level.MEDIUM, Level.LOW] %}
+    <tr><th>{{ i.value }}</th>
+      {% for u in [Level.HIGH, Level.MEDIUM, Level.LOW] %}
+      {% set p = matrix[(i, u)].value %}<td><span class="badge prio-{{ p }}">{{ p }}</span></td>
+      {% endfor %}
+    </tr>
+    {% endfor %}
+  </table>
+</aside>
+</div>
+{% endblock %}

@@ -1,0 +1,8 @@
+# Store text files with LF line endings in the repository, whatever the OS.
+# Git converts on checkout as needed, so Windows editors saving CRLF no longer
+# show every line of a file as changed.
+* text=auto eol=lf
+
+# Binary files: never touch line endings or try to diff them as text.
+*.png binary
+*.db  binary
