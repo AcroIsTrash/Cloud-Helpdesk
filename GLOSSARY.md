@@ -64,7 +64,7 @@ Whatever performs Routing: the keyword baseline or a model.
 _Avoid_: classifier, AI agent
 
 **Routing fallback**:
-Sending a Ticket to the Triage queue because the Router failed or gave an unusable answer.
+Sending a Ticket to the Triage queue because the Router failed, gave an unusable answer, or wasn't confident enough. The reason is always recorded.
 
 **Assignment**:
 Giving a Ticket to one specific Agent.

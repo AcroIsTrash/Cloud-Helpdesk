@@ -34,7 +34,7 @@ AWS-native** (one identity system, IAM instead of API keys, one story).
 | Claude, larger (Sonnet-class) | Suggested replies | Needs reasoning and writing quality; runs only when an agent asks. |
 | Bedrock embeddings (Titan or Cohere) | Vectors for pgvector | Same IAM access; cheap. |
 | Anthropic SDK (Bedrock client) or boto3, called directly | LLM calls | One structured call per feature. Direct calls are easier to test, debug and explain than a framework like LangChain. |
-| Eval harness (pytest + labeled tickets) | Router vs `KeywordRouter` | Turns "added AI" into a measured result: accuracy, fallback rate, cost per ticket, latency. Queue-move events are a live error signal. |
+| Eval harness (pytest + ~200 hand-labeled tickets, ADR-0013) | Router vs `KeywordRouter` | Turns "added AI" into a measured result: accuracy, fallback rate, cost per ticket, latency. Runs in CI when routing changes. Also tunes the confidence threshold below which a decision becomes a Routing fallback (a Parameter Store setting). Queue-move events are a live error signal. |
 
 Confirm which Claude models Bedrock offers in `us-east-1` when building the AI
 phase; store model IDs in Parameter Store, not code.
@@ -43,7 +43,7 @@ phase; store model IDs in Parameter Store, not code.
 
 | Tech | Role | Why |
 |---|---|---|
-| Amazon Cognito (phase 2) | Login; Requester, Agent and Admin groups | Replaces the "Acting as" menu; managed, no password storage; app validates its JWTs and maps groups onto the existing permission rules. Phase 1 builds the seam first: one `current_user` dependency for HTML and API, no `actor_id` in request bodies, and a dev-only login picker. |
+| Amazon Cognito (phase 2) | Login; Requester, Agent and Admin groups | Replaces the "Acting as" menu; managed, no password storage; app validates its JWTs itself, not the ALB (ADR-0012), and maps groups onto the existing permission rules. Phase 1 builds the seam first: one `current_user` dependency for HTML and API, no `actor_id` in request bodies, and a dev-only login picker. |
 
 ## Compute and networking (us-east-1)
 
@@ -51,12 +51,12 @@ phase; store model IDs in Parameter Store, not code.
 |---|---|---|
 | Docker | Packaging | Same image locally and in AWS. |
 | ECR, immutable SHA tags | Image storage | Carried over from `aws-agent`; every running image traces to a commit; rollback = redeploy an older SHA. |
-| ECS on Fargate (ADR-0005) | Run containers | No servers to manage, autoscaling, health-check restarts. EKS costs ~$70/mo for its control plane alone, overkill for one service. |
+| ECS on Fargate (ADR-0005), 2–4 tasks spread over both AZs | Run containers | No servers to manage, CPU autoscaling, health-check restarts; two tasks make the one-AZ-failure claim demonstrable. EKS costs ~$70/mo for its control plane alone, overkill for one service. |
 | Application Load Balancer | HTTPS entry | Spreads load across tasks, drops unhealthy ones, terminates TLS. |
 | ACM + Route 53 | Cert + DNS | Free auto-renewing certs. A bought domain is required: ACM can't certify the ALB's own hostname, and Cognito needs HTTPS callbacks. The hosted zone lives in the foundation layer (ADR-0002). |
-| VPC: public + private subnets, 2 AZs | Network | Only the ALB is public; app and DB sit in private subnets with no inbound internet route; survives one AZ failing. |
+| VPC `10.20.0.0/16`: public, app and data tiers × 2 AZs (ADR-0010) | Network | Only the ALB is public; app and DB have no inbound internet route; the data tier has no outbound route either; survives one AZ failing. |
 | One NAT gateway + S3 gateway endpoint (ADR-0006) | Outbound from private subnets | Cheaper than the ~6 interface endpoints × 2 AZs it replaces, and covers every AWS dependency. Its PAT is the CCNA talking point. The free S3 gateway keeps ECR image layers off NAT data charges. |
-| Security groups chained by reference | Firewall | Internet → ALB:443 → app → DB:5432, nothing else. No SSH; ECS Exec for a shell. |
+| Security groups chained by reference; default NACLs (ADR-0011) | Firewall | Internet → ALB:443 → app:8000 → DB:5432, nothing else. No SSH; ECS Exec for a shell. |
 
 ## Async (only when measured need appears)
 
