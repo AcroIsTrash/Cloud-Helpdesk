@@ -1,6 +1,6 @@
 # Stack
 
-Status: **proposed**, not yet grilled into ADRs. Two principles drive it:
+Status: **being grilled** into ADRs (`docs/adr/`); rows not yet covered by an ADR are still proposed. Two principles drive it:
 **keep what already works** (from `helpdesk` and `aws-agent`) and **stay
 AWS-native** (one identity system, IAM instead of API keys, one story).
 
@@ -53,7 +53,7 @@ phase; store model IDs in Parameter Store, not code.
 | ECR, immutable SHA tags | Image storage | Carried over from `aws-agent`; every running image traces to a commit; rollback = redeploy an older SHA. |
 | ECS on Fargate | Run containers | No servers to manage, autoscaling, health-check restarts. EKS costs ~$70/mo for its control plane alone, overkill for one service. |
 | Application Load Balancer | HTTPS entry | Spreads load across tasks, drops unhealthy ones, terminates TLS. |
-| ACM + Route 53 | Cert + DNS | Free auto-renewing certs. Optional if no domain is bought. |
+| ACM + Route 53 | Cert + DNS | Free auto-renewing certs. A bought domain is required: ACM can't certify the ALB's own hostname, and Cognito needs HTTPS callbacks. The hosted zone lives in the foundation layer (ADR-0002). |
 | VPC: public + private subnets, 2 AZs | Network | Only the ALB is public; app and DB sit in private subnets with no inbound internet route; survives one AZ failing. |
 | VPC endpoints (ECR, Bedrock, Secrets Manager, CloudWatch Logs, S3 gateway) | Private AWS access | Avoids a NAT gateway (~$32/mo each, the classic surprise bill) and is itself a design talking point. |
 | Security groups chained by reference | Firewall | Internet → ALB:443 → app → DB:5432, nothing else. No SSH; ECS Exec for a shell. |
@@ -116,6 +116,5 @@ volume). With `terraform destroy` between sessions, a few dollars a month.
 
 ## Open decisions
 
-1. **Domain**: buy one (~$12/yr) or use the ALB hostname?
-2. **Login timing**: Cognito in phase 1, or keep "Acting as" until later?
-3. **RDS Multi-AZ**: resilient at double the cost, or single-AZ?
+1. **Login timing**: Cognito in phase 1, or keep "Acting as" until later?
+2. **RDS Multi-AZ**: resilient at double the cost, or single-AZ?
