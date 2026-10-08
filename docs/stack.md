@@ -1,6 +1,6 @@
 # Stack
 
-Status: **being grilled** into ADRs (`docs/adr/`); rows not yet covered by an ADR are still proposed. Two principles drive it:
+Status: **decided**. Grilled into ADRs 0001–0013 (`docs/adr/`); change it only through a new ADR. Two principles drive it:
 **keep what already works** (from `helpdesk` and `aws-agent`) and **stay
 AWS-native** (one identity system, IAM instead of API keys, one story).
 
@@ -23,7 +23,7 @@ AWS-native** (one identity system, IAM instead of API keys, one story).
 | Tech | Role | Why |
 |---|---|---|
 | PostgreSQL 16+ (RDS, single-AZ `db.t4g.micro`) | Primary store (ADR-0003) | SQLite is one file on one host; multiple containers need a shared database with concurrent writes. The audit trail writes in the same transaction as each change. |
-| pgvector | Ticket embeddings | Similar-ticket search for suggested replies and duplicate detection, in the same DB: one backup, joins onto `events`. |
+| pgvector | Ticket embeddings | Similar-ticket search for suggested replies and flagging likely Duplicates for an Agent to confirm (never closed automatically), in the same DB: one backup, joins onto `events`. |
 
 ## AI
 
@@ -49,8 +49,8 @@ phase; store model IDs in Parameter Store, not code.
 
 | Tech | Role | Why |
 |---|---|---|
-| Docker | Packaging | Same image locally and in AWS. |
-| ECR, immutable SHA tags | Image storage | Carried over from `aws-agent`; every running image traces to a commit; rollback = redeploy an older SHA. |
+| Docker | Packaging | Same image locally and in AWS. Multi-stage build on `python:3.13-slim` pinned by digest; `uv sync --frozen`; app copied from this repo's checkout, never cloned at build time; runs as non-root; `/healthz` checks the DB for the ALB. |
+| ECR, immutable full-SHA tags | Image storage | Carried over from `aws-agent` (which used short SHAs; full SHAs can't collide); every running image traces to a commit; rollback = redeploy an older SHA. |
 | ECS on Fargate (ADR-0005), 2–4 tasks spread over both AZs | Run containers | No servers to manage, CPU autoscaling, health-check restarts; two tasks make the one-AZ-failure claim demonstrable. EKS costs ~$70/mo for its control plane alone, overkill for one service. |
 | Application Load Balancer | HTTPS entry | Spreads load across tasks, drops unhealthy ones, terminates TLS. |
 | ACM + Route 53 | Cert + DNS | Free auto-renewing certs. A bought domain is required: ACM can't certify the ALB's own hostname, and Cognito needs HTTPS callbacks. The hosted zone lives in the foundation layer (ADR-0002). |
@@ -77,7 +77,7 @@ phase; store model IDs in Parameter Store, not code.
 |---|---|---|
 | Terraform: `infra/foundation` (permanent) + `infra/runtime` (network, data, app modules; destroyed between sessions) (ADR-0002) | All infrastructure | Each layer readable on its own; only the runtime bills hourly. Applied from the owner's machine via `make up` / `make down` (ADR-0009). |
 | S3 backend with native lockfile | State | Fixes local-only `tfstate` from `aws-agent`; Terraform ≥1.10 locks in S3, no DynamoDB table needed. |
-| GitHub Actions + OIDC | Pipeline | test + lint → eval → build/push to ECR → migrate → deploy. No stored AWS keys. The CI role can only push one ECR repo, run the migration task and update one service; deploy steps skip when the runtime is down (ADR-0009). |
+| GitHub Actions + OIDC; protected `main` | Pipeline | test + lint → eval → build/push to ECR → migrate → deploy. No stored AWS keys. The CI role can only push one ECR repo, run the migration task and update one service; deploy steps skip when the runtime is down (ADR-0009). Work lands through PRs with green CI; the OIDC trust accepts only `refs/heads/main`, so only a merge deploys. |
 | ECS rolling deploy + circuit breaker | Release | Automatic rollback if new tasks fail health checks. Replaces SSM Run Command. |
 
 ## Observability and cost
@@ -85,7 +85,7 @@ phase; store model IDs in Parameter Store, not code.
 | Tech | Role | Why |
 |---|---|---|
 | CloudWatch Logs (JSON) | Logs | Native to ECS. |
-| CloudWatch metrics + dashboard | Latency, errors, LLM cost per ticket, AI fallback rate, draft acceptance rate | The AI numbers are the headline of Layer 4. |
+| CloudWatch metrics + dashboard | Latency, errors, LLM cost per ticket, AI fallback rate, Suggested reply outcomes (sent as is / edited with similarity / discarded), Duplicate flags confirmed | The AI numbers are the headline of Layer 4. |
 | OpenTelemetry → X-Ray | Traces | Shows where time goes: DB, Bedrock, app. |
 | AWS Budgets | Cost alarm | First resource, every time. |
 
@@ -95,6 +95,17 @@ phase; store model IDs in Parameter Store, not code.
 |---|---|---|
 | docker-compose (app + `pgvector/pgvector` Postgres) | Local stack | Production-shaped, zero AWS cost. |
 | Fake LLM client | Tests and local runs | Free, fast, deterministic. Only the eval harness calls real models. |
+
+## Repository layout
+
+```
+app/              FastAPI app (imported from helpdesk)
+migrations/       Alembic
+tests/
+evals/routing/    labeled set + harness
+infra/foundation/ infra/runtime/{network,data,app}/
+docs/adr/  GLOSSARY.md  README.md  Makefile  docker-compose.yml  Dockerfile
+```
 
 ## Deliberately left out
 

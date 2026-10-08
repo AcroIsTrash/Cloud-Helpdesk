@@ -45,6 +45,10 @@ _Avoid_: reply, message
 A message on a Ticket that only Agents can see. It never counts as a Response.
 _Avoid_: private comment, hidden comment
 
+**Duplicate**:
+A Ticket closed by an Agent because it repeats another Ticket, and linked to that original.
+_Avoid_: merged ticket, copy
+
 ## Queues and routing
 
 **Queue**:

@@ -32,7 +32,7 @@ it isn't already cloned beside this one.
 
 - [x] Matt Pocock's skills vendored into `.claude/skills/` (see `SOURCE.md` there)
 - [x] `/setup-matt-pocock-skills` (GitHub Issues on this repo; default triage labels; single-context docs; see `docs/agents/`)
-- [ ] Stack grilled and recorded as ADRs (`/grill-with-docs`)
+- [x] Stack grilled and recorded as ADRs (`docs/adr/` 0001–0013, `GLOSSARY.md`)
 - [ ] Phase 1: import app, Postgres + Alembic + auth, docker-compose
 - [ ] Phase 2: Terraform (VPC, ECS Fargate, RDS, ALB) + deploy pipeline
 - [ ] Phase 3: LLM router + eval harness against `KeywordRouter`
