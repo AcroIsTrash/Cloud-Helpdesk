@@ -27,6 +27,9 @@ from .routing import Router, RoutingDecision
 
 log = logging.getLogger(__name__)
 
+# A database row as a plain dict: column name -> value.
+Row = dict[str, Any]
+
 AGENT_ROLES = {"agent", "admin"}
 # Requesters may only confirm or reject a fix on their own ticket.
 REQUESTER_TRANSITIONS = {(Status.RESOLVED, Status.OPEN), (Status.RESOLVED, Status.CLOSED)}
@@ -60,45 +63,57 @@ def _parse(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value) if value else None
 
 
-def is_agent(user: dict) -> bool:
+def _at(value: str) -> datetime:
+    """Parse a timestamp column that is never NULL where it is read."""
+    return datetime.fromisoformat(value)
+
+
+def is_agent(user: Row) -> bool:
     return user["role"] in AGENT_ROLES
 
 
-def get_user(conn: sqlite3.Connection, user_id: int) -> dict:
+def get_user(conn: sqlite3.Connection, user_id: int) -> Row:
     row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
     if row is None:
         raise NotFound(f"user {user_id} not found")
     return dict(row)
 
 
-def list_users(conn: sqlite3.Connection, roles: set[str] | None = None) -> list[dict]:
+def list_users(conn: sqlite3.Connection, roles: set[str] | None = None) -> list[Row]:
     rows = [dict(r) for r in conn.execute("SELECT * FROM users ORDER BY role, name")]
     return [r for r in rows if roles is None or r["role"] in roles]
 
 
-def _ticket(conn: sqlite3.Connection, ticket_id: int) -> dict:
+def _ticket(conn: sqlite3.Connection, ticket_id: int) -> Row:
     row = conn.execute("SELECT * FROM tickets WHERE id = ?", (ticket_id,)).fetchone()
     if row is None:
         raise NotFound(f"ticket {ticket_id} not found")
     return dict(row)
 
 
-def _log(conn, ticket_id: int, actor_id: int | None, kind: str, detail: str, now: datetime) -> None:
+def _log(
+    conn: sqlite3.Connection,
+    ticket_id: int,
+    actor_id: int | None,
+    kind: str,
+    detail: str,
+    now: datetime,
+) -> None:
     conn.execute(
         "INSERT INTO events (ticket_id, actor_id, kind, detail, created_at) VALUES (?, ?, ?, ?, ?)",
         (ticket_id, actor_id, kind, detail, _iso(now)),
     )
 
 
-def _update(conn, ticket_id: int, now: datetime, **fields: Any) -> None:
+def _update(conn: sqlite3.Connection, ticket_id: int, now: datetime, **fields: Any) -> None:
     fields["updated_at"] = _iso(now)
     cols = ", ".join(f"{k} = ?" for k in fields)  # keys are internal, never user input
     conn.execute(f"UPDATE tickets SET {cols} WHERE id = ?", (*fields.values(), ticket_id))
 
 
-def _unpause(t: dict, now: datetime) -> dict:
+def _unpause(t: Row, now: datetime) -> Row:
     """Fields that stop the SLA pause clock and bank the paused time."""
-    paused = int((now - _parse(t["paused_since"])).total_seconds())
+    paused = int((now - _at(t["paused_since"])).total_seconds())
     return {"paused_seconds": t["paused_seconds"] + paused, "paused_since": None}
 
 
@@ -138,7 +153,9 @@ def _safe_route(router: Router, title: str, description: str) -> tuple[RoutingDe
 # ---- commands ------------------------------------------------------------
 
 
-def create_ticket(conn, data: TicketCreate, router: Router, now: datetime | None = None) -> int:
+def create_ticket(
+    conn: sqlite3.Connection, data: TicketCreate, router: Router, now: datetime | None = None
+) -> int:
     now = now or utcnow()
     get_user(conn, data.requester_id)
     priority = compute_priority(data.impact, data.urgency)
@@ -172,6 +189,7 @@ def create_ticket(conn, data: TicketCreate, router: Router, now: datetime | None
             ),
         )
         tid = cur.lastrowid
+        assert tid is not None  # set by the INSERT above
         _log(
             conn,
             tid,
@@ -195,7 +213,7 @@ def create_ticket(conn, data: TicketCreate, router: Router, now: datetime | None
 
 
 def transition(
-    conn,
+    conn: sqlite3.Connection,
     ticket_id: int,
     actor_id: int,
     to_status: Status,
@@ -259,7 +277,11 @@ def transition(
 
 
 def assign(
-    conn, ticket_id: int, actor_id: int, assignee_id: int | None, now: datetime | None = None
+    conn: sqlite3.Connection,
+    ticket_id: int,
+    actor_id: int,
+    assignee_id: int | None,
+    now: datetime | None = None,
 ) -> None:
     now = now or utcnow()
     t = _ticket(conn, ticket_id)
@@ -297,7 +319,9 @@ def assign(
             _log(conn, ticket_id, actor_id, kind, detail, now)
 
 
-def add_comment(conn, ticket_id: int, data: CommentCreate, now: datetime | None = None) -> int:
+def add_comment(
+    conn: sqlite3.Connection, ticket_id: int, data: CommentCreate, now: datetime | None = None
+) -> int:
     now = now or utcnow()
     t = _ticket(conn, ticket_id)
     author = get_user(conn, data.author_id)
@@ -339,6 +363,7 @@ def add_comment(conn, ticket_id: int, data: CommentCreate, now: datetime | None 
             )
         else:
             _update(conn, ticket_id, now)
+    assert cur.lastrowid is not None  # set by the INSERT above
     return cur.lastrowid
 
 
@@ -353,14 +378,15 @@ _TICKET_SELECT = """
 
 
 def list_tickets(
-    conn,
+    conn: sqlite3.Connection,
     status: Status | None = None,
     include_closed: bool = False,
     queue: str | None = None,
     assignee_id: int | None = None,
     requester_id: int | None = None,
-) -> list[dict]:
-    where, params = [], []
+) -> list[Row]:
+    where: list[str] = []
+    params: list[str | int] = []
     if status is not None:
         where.append("t.status = ?")
         params.append(status.value)
@@ -379,9 +405,10 @@ def list_tickets(
     return [dict(r) for r in conn.execute(sql, params)]
 
 
-def status_counts(conn, requester_id: int | None = None) -> dict[str, int]:
+def status_counts(conn: sqlite3.Connection, requester_id: int | None = None) -> dict[str, int]:
     counts = {s.value: 0 for s in Status}
-    sql, params = "SELECT status, COUNT(*) FROM tickets", []
+    sql = "SELECT status, COUNT(*) FROM tickets"
+    params: list[int] = []
     if requester_id is not None:
         sql += " WHERE requester_id = ?"
         params.append(requester_id)
@@ -390,7 +417,7 @@ def status_counts(conn, requester_id: int | None = None) -> dict[str, int]:
     return counts
 
 
-def ticket_detail(conn, ticket_id: int, viewer: dict | None = None) -> dict:
+def ticket_detail(conn: sqlite3.Connection, ticket_id: int, viewer: Row | None = None) -> Row:
     row = conn.execute(_TICKET_SELECT + " WHERE t.id = ?", (ticket_id,)).fetchone()
     if row is None:
         raise NotFound(f"ticket {ticket_id} not found")
@@ -426,7 +453,7 @@ def ticket_detail(conn, ticket_id: int, viewer: dict | None = None) -> dict:
     }
 
 
-def next_statuses(ticket: dict, viewer: dict) -> list[Status]:
+def next_statuses(ticket: Row, viewer: Row) -> list[Status]:
     current = Status(ticket["status"])
     options = sorted(ALLOWED_TRANSITIONS[current], key=list(Status).index)
     if is_agent(viewer):
@@ -439,7 +466,7 @@ def next_statuses(ticket: dict, viewer: dict) -> list[Status]:
 # ---- SLA -----------------------------------------------------------------
 
 
-def _clock(elapsed: timedelta, target: timedelta, done: bool) -> dict:
+def _clock(elapsed: timedelta, target: timedelta, done: bool) -> Row:
     ratio = elapsed / target
     if done:
         state = "met" if elapsed <= target else "breached"
@@ -458,7 +485,7 @@ def _clock(elapsed: timedelta, target: timedelta, done: bool) -> dict:
     }
 
 
-def sla_status(t: dict, now: datetime | None = None) -> dict:
+def sla_status(t: Row, now: datetime | None = None) -> Row:
     """Two clocks: time to first response, and time to resolution (minus pauses).
 
     A ticket closed without ever being resolved (duplicate, spam) was never real
@@ -466,24 +493,24 @@ def sla_status(t: dict, now: datetime | None = None) -> dict:
     """
     now = now or utcnow()
     response_target, resolution_target = SLA_TARGETS[Priority(t["priority"])]
-    created = _parse(t["created_at"])
+    created = _at(t["created_at"])
     resolved, closed = _parse(t["resolved_at"]), _parse(t["closed_at"])
     responded = _parse(t["first_response_at"])
     cancelled = closed is not None and resolved is None
 
     if cancelled and responded is None:
-        response = {"state": "cancelled"}
+        response: Row = {"state": "cancelled"}
     else:
         # Resolving or closing a ticket is itself an answer to the requester.
         answered = responded or resolved or closed
         response = _clock((answered or now) - created, response_target, done=answered is not None)
 
     if cancelled:
-        resolution = {"state": "cancelled"}
+        resolution: Row = {"state": "cancelled"}
     else:
         paused = timedelta(seconds=t["paused_seconds"])
         if t["paused_since"]:
-            paused += now - _parse(t["paused_since"])
+            paused += now - _at(t["paused_since"])
         resolution = _clock(
             (resolved or now) - created - paused, resolution_target, done=resolved is not None
         )

@@ -6,13 +6,16 @@ Run:  uv run python -m uvicorn app.main:app --reload
 from __future__ import annotations
 
 import os
+import sqlite3
+from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlencode
 
 from fastapi import Depends, FastAPI, Form, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
 
@@ -41,7 +44,7 @@ def db_path() -> str:
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI):
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     conn = connect(db_path())
     init_db(conn)
     if os.environ.get("HELPDESK_DEMO", "1") == "1":
@@ -54,7 +57,7 @@ app = FastAPI(title="Help Desk", lifespan=lifespan)
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
 
-def get_conn():
+def get_conn() -> Iterator[sqlite3.Connection]:
     conn = connect(db_path())
     try:
         yield conn
@@ -101,7 +104,7 @@ templates.env.filters["label"] = lambda v: str(v).replace("_", " ")
 
 
 @app.exception_handler(svc.TicketError)
-async def ticket_error_handler(_: Request, exc: svc.TicketError):
+async def ticket_error_handler(_: Request, exc: svc.TicketError) -> JSONResponse:
     code = (
         404
         if isinstance(exc, svc.NotFound)
@@ -113,7 +116,7 @@ async def ticket_error_handler(_: Request, exc: svc.TicketError):
 
 
 @app.get("/api/users", tags=["api"])
-def api_users(conn=Depends(get_conn)):
+def api_users(conn: sqlite3.Connection = Depends(get_conn)) -> list[svc.Row]:
     return svc.list_users(conn)
 
 
@@ -123,8 +126,8 @@ def api_list(
     include_closed: bool = False,
     queue: str | None = None,
     assignee_id: int | None = None,
-    conn=Depends(get_conn),
-):
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> list[svc.Row]:
     rows = svc.list_tickets(
         conn, status=status, include_closed=include_closed, queue=queue, assignee_id=assignee_id
     )
@@ -132,30 +135,36 @@ def api_list(
 
 
 @app.post("/api/tickets", status_code=201, tags=["api"])
-def api_create(body: TicketCreate, conn=Depends(get_conn)):
+def api_create(body: TicketCreate, conn: sqlite3.Connection = Depends(get_conn)) -> svc.Row:
     tid = svc.create_ticket(conn, body, ROUTER)
     return svc.ticket_detail(conn, tid)
 
 
 @app.get("/api/tickets/{ticket_id}", tags=["api"])
-def api_detail(ticket_id: int, conn=Depends(get_conn)):
+def api_detail(ticket_id: int, conn: sqlite3.Connection = Depends(get_conn)) -> svc.Row:
     return svc.ticket_detail(conn, ticket_id)
 
 
 @app.post("/api/tickets/{ticket_id}/transition", tags=["api"])
-def api_transition(ticket_id: int, body: TransitionRequest, conn=Depends(get_conn)):
+def api_transition(
+    ticket_id: int, body: TransitionRequest, conn: sqlite3.Connection = Depends(get_conn)
+) -> svc.Row:
     svc.transition(conn, ticket_id, body.actor_id, body.to_status, body.note)
     return svc.ticket_detail(conn, ticket_id)
 
 
 @app.post("/api/tickets/{ticket_id}/assign", tags=["api"])
-def api_assign(ticket_id: int, body: AssignRequest, conn=Depends(get_conn)):
+def api_assign(
+    ticket_id: int, body: AssignRequest, conn: sqlite3.Connection = Depends(get_conn)
+) -> svc.Row:
     svc.assign(conn, ticket_id, body.actor_id, body.assignee_id)
     return svc.ticket_detail(conn, ticket_id)
 
 
 @app.post("/api/tickets/{ticket_id}/comments", status_code=201, tags=["api"])
-def api_comment(ticket_id: int, body: CommentCreate, conn=Depends(get_conn)):
+def api_comment(
+    ticket_id: int, body: CommentCreate, conn: sqlite3.Connection = Depends(get_conn)
+) -> svc.Row:
     svc.add_comment(conn, ticket_id, body)
     return svc.ticket_detail(conn, ticket_id)
 
@@ -165,14 +174,14 @@ def api_comment(ticket_id: int, body: CommentCreate, conn=Depends(get_conn)):
 # demo the requester and agent views side by side.
 
 
-def current_user(request: Request, conn) -> dict:
+def current_user(request: Request, conn: sqlite3.Connection) -> svc.Row:
     try:
         return svc.get_user(conn, int(request.cookies.get("acting_as", "")))
     except (ValueError, svc.NotFound):
         return svc.list_users(conn, roles={"agent"})[0]
 
 
-def render(request: Request, conn, name: str, **ctx):
+def render(request: Request, conn: sqlite3.Connection, name: str, **ctx: Any) -> HTMLResponse:
     user = current_user(request, conn)
     ctx.update(
         users=svc.list_users(conn),
@@ -189,7 +198,7 @@ def back(path: str, error: Exception | str | None = None) -> RedirectResponse:
 
 
 @app.post("/act-as", include_in_schema=False)
-def act_as(user_id: int = Form(...), next: str = Form("/")):
+def act_as(user_id: int = Form(...), next: str = Form("/")) -> RedirectResponse:
     # Only same-site paths: "//host" and "/\host" are protocol-relative URLs.
     if not next.startswith("/") or next[1:2] in {"/", "\\"}:
         next = "/"
@@ -200,8 +209,12 @@ def act_as(user_id: int = Form(...), next: str = Form("/")):
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 def index(
-    request: Request, status: str = "", queue: str = "", mine: bool = False, conn=Depends(get_conn)
-):
+    request: Request,
+    status: str = "",
+    queue: str = "",
+    mine: bool = False,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> HTMLResponse:
     user = current_user(request, conn)
     agent = svc.is_agent(user)
     status_enum = Status(status) if status in {s.value for s in Status} else None
@@ -230,7 +243,7 @@ def index(
 
 
 @app.get("/tickets/new", response_class=HTMLResponse, include_in_schema=False)
-def new_ticket_form(request: Request, conn=Depends(get_conn)):
+def new_ticket_form(request: Request, conn: sqlite3.Connection = Depends(get_conn)) -> HTMLResponse:
     return render(
         request,
         conn,
@@ -250,17 +263,19 @@ def create_ticket_form(
     impact: str = Form("medium"),
     urgency: str = Form("medium"),
     category: str = Form(""),
-    conn=Depends(get_conn),
-):
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> RedirectResponse:
     user = current_user(request, conn)
     try:
-        data = TicketCreate(
-            title=title,
-            description=description,
-            requester_id=user["id"],
-            impact=impact,
-            urgency=urgency,
-            category=category or None,
+        data = TicketCreate.model_validate(
+            {
+                "title": title,
+                "description": description,
+                "requester_id": user["id"],
+                "impact": impact,
+                "urgency": urgency,
+                "category": category or None,
+            }
         )
     except ValidationError as e:
         first = e.errors()[0]
@@ -270,7 +285,9 @@ def create_ticket_form(
 
 
 @app.get("/tickets/{ticket_id}", response_class=HTMLResponse, include_in_schema=False)
-def ticket_page(request: Request, ticket_id: int, conn=Depends(get_conn)):
+def ticket_page(
+    request: Request, ticket_id: int, conn: sqlite3.Connection = Depends(get_conn)
+) -> Response:
     user = current_user(request, conn)
     try:
         detail = svc.ticket_detail(conn, ticket_id, viewer=user)
@@ -292,8 +309,8 @@ def comment_form(
     ticket_id: int,
     body: str = Form(""),
     internal: bool = Form(False),
-    conn=Depends(get_conn),
-):
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> RedirectResponse:
     user = current_user(request, conn)
     try:
         svc.add_comment(
@@ -313,8 +330,8 @@ def transition_form(
     ticket_id: int,
     to_status: str = Form(...),
     note: str = Form(""),
-    conn=Depends(get_conn),
-):
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> RedirectResponse:
     user = current_user(request, conn)
     try:
         svc.transition(conn, ticket_id, user["id"], Status(to_status), note)
@@ -325,8 +342,11 @@ def transition_form(
 
 @app.post("/tickets/{ticket_id}/assign", include_in_schema=False)
 def assign_form(
-    request: Request, ticket_id: int, assignee_id: str = Form(""), conn=Depends(get_conn)
-):
+    request: Request,
+    ticket_id: int,
+    assignee_id: str = Form(""),
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> RedirectResponse:
     user = current_user(request, conn)
     try:
         svc.assign(conn, ticket_id, user["id"], int(assignee_id) if assignee_id else None)

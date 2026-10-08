@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime, timedelta
 
 from . import services as svc
@@ -9,13 +10,13 @@ from .models import CommentCreate, Level, Status, TicketCreate
 from .routing import Router
 
 
-def seed_demo(conn, router: Router) -> None:
+def seed_demo(conn: sqlite3.Connection, router: Router) -> None:
     if conn.execute("SELECT COUNT(*) FROM tickets").fetchone()[0]:
         return
     u = {r["email"].split("@")[0]: r["id"] for r in svc.list_users(conn)}
     now = svc.utcnow()
 
-    def ago(**kw) -> datetime:
+    def ago(**kw: float) -> datetime:
         return now - timedelta(**kw)
 
     # 1. Network issue, waiting on the requester (SLA paused)
