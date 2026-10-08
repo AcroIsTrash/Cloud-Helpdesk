@@ -14,7 +14,7 @@ A human support staff member who works tickets. Always a person, never software.
 _Avoid_: technician, staff, operator, "AI agent"
 
 **Admin**:
-An Agent with extra rights over the service desk itself.
+An Agent who can also manage the service desk itself: its Queues and the people in it.
 _Avoid_: superuser, manager
 
 ## Tickets

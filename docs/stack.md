@@ -8,12 +8,12 @@ AWS-native** (one identity system, IAM instead of API keys, one story).
 
 | Tech | Role | Why |
 |---|---|---|
-| Python 3.12+ | Language | Existing code; strongest AI tooling. |
+| Python 3.13 (one version everywhere) | Language | Existing code; strongest AI tooling. One pinned version across `.python-version`, `requires-python`, the base image and CI. |
 | FastAPI | Web + JSON API | Existing; async so slow LLM calls don't block other requests; typed models; free OpenAPI docs. |
 | Jinja2 server-rendered HTML | UI | Existing and good. A SPA doubles the work without serving the AI/infra story. HTMX later if a page needs it. |
 | Pydantic v2 + pydantic-settings | Validation, config | Existing; also validates LLM output before anything trusts it. |
-| SQLAlchemy 2.0 (Core-style) | DB access | Replaces raw `sqlite3`; pooling for Postgres; Alembic builds on it. Keep queries explicit so services read plainly. |
-| Alembic | Migrations | Replaces "delete `helpdesk.db` after a schema change." |
+| SQLAlchemy 2.0 Core, declared tables, no ORM (ADR-0007) | DB access | Replaces raw `sqlite3`; pooling for Postgres; Alembic generates migrations from the declared tables. Queries stay explicit so services read plainly. |
+| Alembic | Migrations | Replaces "delete `helpdesk.db` after a schema change." Runs as a one-off ECS task before each deploy (ADR-0008). |
 | uv | Dependencies | Existing; lockfile gives reproducible images. |
 | pytest + testcontainers | Tests | Existing fixed-clock tests, now against real Postgres. |
 | ruff + mypy | Lint, types | Fast CI gate. |
@@ -22,14 +22,14 @@ AWS-native** (one identity system, IAM instead of API keys, one story).
 
 | Tech | Role | Why |
 |---|---|---|
-| PostgreSQL 16+ (RDS) | Primary store | SQLite is one file on one host; multiple containers need a shared database with concurrent writes. The audit trail writes in the same transaction as each change. |
+| PostgreSQL 16+ (RDS, single-AZ `db.t4g.micro`) | Primary store (ADR-0003) | SQLite is one file on one host; multiple containers need a shared database with concurrent writes. The audit trail writes in the same transaction as each change. |
 | pgvector | Ticket embeddings | Similar-ticket search for suggested replies and duplicate detection, in the same DB: one backup, joins onto `events`. |
 
 ## AI
 
 | Tech | Role | Why |
 |---|---|---|
-| Amazon Bedrock | Model access | IAM task role calls it: no API key to store or rotate; billing and CloudTrail in AWS; swap models without code changes. |
+| Amazon Bedrock | Model access (ADR-0004) | IAM task role calls it: no API key to store or rotate; billing and CloudTrail in AWS; swap models without code changes. |
 | Claude, small (Haiku-class) | Routing, classification, summaries | Short structured decisions; cheap and fast enough for every ticket. |
 | Claude, larger (Sonnet-class) | Suggested replies | Needs reasoning and writing quality; runs only when an agent asks. |
 | Bedrock embeddings (Titan or Cohere) | Vectors for pgvector | Same IAM access; cheap. |
@@ -43,7 +43,7 @@ phase; store model IDs in Parameter Store, not code.
 
 | Tech | Role | Why |
 |---|---|---|
-| Amazon Cognito | Login, agent vs requester roles | Replaces the "Acting as" menu; managed, no password storage; app validates its JWTs and maps groups onto the existing permission rules. |
+| Amazon Cognito (phase 2) | Login; Requester, Agent and Admin groups | Replaces the "Acting as" menu; managed, no password storage; app validates its JWTs and maps groups onto the existing permission rules. Phase 1 builds the seam first: one `current_user` dependency for HTML and API, no `actor_id` in request bodies, and a dev-only login picker. |
 
 ## Compute and networking (us-east-1)
 
@@ -51,11 +51,11 @@ phase; store model IDs in Parameter Store, not code.
 |---|---|---|
 | Docker | Packaging | Same image locally and in AWS. |
 | ECR, immutable SHA tags | Image storage | Carried over from `aws-agent`; every running image traces to a commit; rollback = redeploy an older SHA. |
-| ECS on Fargate | Run containers | No servers to manage, autoscaling, health-check restarts. EKS costs ~$70/mo for its control plane alone, overkill for one service. |
+| ECS on Fargate (ADR-0005) | Run containers | No servers to manage, autoscaling, health-check restarts. EKS costs ~$70/mo for its control plane alone, overkill for one service. |
 | Application Load Balancer | HTTPS entry | Spreads load across tasks, drops unhealthy ones, terminates TLS. |
 | ACM + Route 53 | Cert + DNS | Free auto-renewing certs. A bought domain is required: ACM can't certify the ALB's own hostname, and Cognito needs HTTPS callbacks. The hosted zone lives in the foundation layer (ADR-0002). |
 | VPC: public + private subnets, 2 AZs | Network | Only the ALB is public; app and DB sit in private subnets with no inbound internet route; survives one AZ failing. |
-| VPC endpoints (ECR, Bedrock, Secrets Manager, CloudWatch Logs, S3 gateway) | Private AWS access | Avoids a NAT gateway (~$32/mo each, the classic surprise bill) and is itself a design talking point. |
+| One NAT gateway + S3 gateway endpoint (ADR-0006) | Outbound from private subnets | Cheaper than the ~6 interface endpoints × 2 AZs it replaces, and covers every AWS dependency. Its PAT is the CCNA talking point. The free S3 gateway keeps ECR image layers off NAT data charges. |
 | Security groups chained by reference | Firewall | Internet → ALB:443 → app → DB:5432, nothing else. No SSH; ECS Exec for a shell. |
 
 ## Async (only when measured need appears)
@@ -75,9 +75,9 @@ phase; store model IDs in Parameter Store, not code.
 
 | Tech | Role | Why |
 |---|---|---|
-| Terraform, split into modules (network, data, app) | All infrastructure | Carried over; each layer readable on its own. |
+| Terraform: `infra/foundation` (permanent) + `infra/runtime` (network, data, app modules; destroyed between sessions) (ADR-0002) | All infrastructure | Each layer readable on its own; only the runtime bills hourly. Applied from the owner's machine via `make up` / `make down` (ADR-0009). |
 | S3 backend with native lockfile | State | Fixes local-only `tfstate` from `aws-agent`; Terraform ≥1.10 locks in S3, no DynamoDB table needed. |
-| GitHub Actions + OIDC | Pipeline | test + lint → eval → build/push to ECR → migrate → deploy. No stored AWS keys. |
+| GitHub Actions + OIDC | Pipeline | test + lint → eval → build/push to ECR → migrate → deploy. No stored AWS keys. The CI role can only push one ECR repo, run the migration task and update one service; deploy steps skip when the runtime is down (ADR-0009). |
 | ECS rolling deploy + circuit breaker | Release | Automatic rollback if new tasks fail health checks. Replaces SSM Run Command. |
 
 ## Observability and cost
@@ -101,7 +101,9 @@ phase; store model IDs in Parameter Store, not code.
 - **EKS/Kubernetes**: cost and complexity for a single service.
 - **LangChain**: an abstraction layer the use cases don't need.
 - **Separate vector DB** (Pinecone, OpenSearch): pgvector covers it.
-- **NAT gateway**: VPC endpoints instead.
+- **Interface VPC endpoints**: one NAT gateway is cheaper and simpler here (ADR-0006).
+- **RDS Multi-AZ**: data is reseeded on every bring-up (ADR-0001); named in the README as the production upgrade.
+- **Terraform in CI**: would need a near-admin role (ADR-0009).
 - **React/SPA**: doesn't serve the story.
 - **Self-hosted models (Ollama)**: a GPU instance costs far more than Bedrock
   at this volume; that's a separate project.
@@ -110,11 +112,8 @@ phase; store model IDs in Parameter Store, not code.
 
 ## Running cost
 
-About **$50–90/month if left up 24/7** (ALB ~$16, RDS free-tier or ~$15,
-Fargate ~$20, interface endpoints ~$7 each per AZ, Bedrock pennies at demo
-volume). With `terraform destroy` between sessions, a few dollars a month.
-
-## Open decisions
-
-1. **Login timing**: Cognito in phase 1, or keep "Acting as" until later?
-2. **RDS Multi-AZ**: resilient at double the cost, or single-AZ?
+The environment runs on demand (ADR-0001). Up 24/7 it would be about
+**$70–90/month** (NAT ~$33, ALB ~$16, RDS free-tier or ~$15, Fargate ~$20,
+Bedrock pennies at demo volume). Brought up only for work and demos, it's a
+few dollars a month; the foundation layer costs about $1/month (hosted zone,
+ECR storage) plus the domain at ~$14/year.
