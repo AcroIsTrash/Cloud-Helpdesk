@@ -17,6 +17,10 @@ _Avoid_: technician, staff, operator, "AI agent"
 An Agent who can also manage the service desk itself: its Queues and the people in it.
 _Avoid_: superuser, manager
 
+**Deactivated**:
+A person whose access to the service desk has been switched off by an Admin. Their history stays; they can no longer act.
+_Avoid_: deleted, removed, banned
+
 ## Tickets
 
 **Ticket**:
@@ -95,5 +99,5 @@ A short model-written digest of a Ticket's history, for Agents.
 ## Audit
 
 **Event**:
-One entry in the append-only record of everything that happened to a Ticket, including every AI decision with its reason and confidence.
+One entry in the append-only record of everything that happened to a Ticket or to a person's access, including every AI decision with its reason and confidence.
 _Avoid_: log, history entry
