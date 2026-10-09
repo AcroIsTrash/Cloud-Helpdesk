@@ -51,3 +51,37 @@ jobs:
         run: uv sync --locked
       - name: pytest
         run: uv run pytest
+
+  # The declared tables (app/db.py) and the migrations must describe the same
+  # schema: upgrade an empty database to head, then autogenerate must find
+  # nothing left to do. Fails when a table changes without a migration.
+  migrations:
+    name: migrations
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: helpdesk
+          POSTGRES_PASSWORD: helpdesk
+          POSTGRES_DB: helpdesk
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U helpdesk"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 15
+    env:
+      DATABASE_URL: postgresql+psycopg://helpdesk:helpdesk@localhost:5432/helpdesk
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Install dependencies from the lockfile
+        run: uv sync --locked
+      - name: Upgrade an empty database to head
+        run: uv run alembic upgrade head
+      - name: Autogenerate finds no differences
+        run: uv run alembic check

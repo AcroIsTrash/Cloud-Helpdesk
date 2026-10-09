@@ -6,7 +6,6 @@ Run:  uv run python -m uvicorn app.main:app --reload
 from __future__ import annotations
 
 import os
-import sqlite3
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -18,9 +17,10 @@ from fastapi import Depends, FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
+from sqlalchemy import Connection, inspect
 
 from . import services as svc
-from .db import connect, init_db
+from .db import make_engine, seed_users
 from .models import (
     ALL_QUEUES,
     PRIORITY_MATRIX,
@@ -39,39 +39,42 @@ from .seed import seed_demo
 ROUTER = KeywordRouter()
 
 
-def db_path() -> str:
-    return os.environ.get("HELPDESK_DB", "helpdesk.db")
-
-
 @asynccontextmanager
-async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    conn = connect(db_path())
-    init_db(conn)
-    if os.environ.get("HELPDESK_DEMO", "1") == "1":
-        seed_demo(conn, ROUTER)
-    conn.close()
-    yield
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    engine = make_engine()
+    try:
+        with engine.connect() as conn:
+            # The schema belongs to Alembic (ADR-0008); the app never creates tables.
+            if not inspect(conn).has_table("tickets"):
+                raise RuntimeError(
+                    "database has no schema; run `uv run alembic upgrade head` first"
+                )
+            seed_users(conn)
+            if os.environ.get("HELPDESK_DEMO", "1") == "1":
+                seed_demo(conn, ROUTER)
+        app.state.engine = engine
+        yield
+    finally:
+        engine.dispose()
 
 
 app = FastAPI(title="Help Desk", lifespan=lifespan)
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
 
-def get_conn() -> Iterator[sqlite3.Connection]:
-    conn = connect(db_path())
-    try:
+def get_conn(request: Request) -> Iterator[Connection]:
+    # Closing the connection rolls back anything a failed request left uncommitted.
+    with request.app.state.engine.connect() as conn:
         yield conn
-    finally:
-        conn.close()
 
 
 # ---- template filters ------------------------------------------------------
 
 
-def _ago(value: str | None) -> str:
+def _ago(value: datetime | None) -> str:
     if not value:
         return ""
-    s = int((svc.utcnow() - datetime.fromisoformat(value)).total_seconds())
+    s = int((svc.utcnow() - value).total_seconds())
     if s < 60:
         return "just now"
     if s < 3600:
@@ -116,7 +119,7 @@ async def ticket_error_handler(_: Request, exc: svc.TicketError) -> JSONResponse
 
 
 @app.get("/api/users", tags=["api"], response_model=None)
-def api_users(conn: sqlite3.Connection = Depends(get_conn)) -> list[svc.Row]:
+def api_users(conn: Connection = Depends(get_conn)) -> list[svc.Row]:
     return svc.list_users(conn)
 
 
@@ -126,7 +129,7 @@ def api_list(
     include_closed: bool = False,
     queue: str | None = None,
     assignee_id: int | None = None,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: Connection = Depends(get_conn),
 ) -> list[svc.Row]:
     rows = svc.list_tickets(
         conn, status=status, include_closed=include_closed, queue=queue, assignee_id=assignee_id
@@ -135,19 +138,19 @@ def api_list(
 
 
 @app.post("/api/tickets", status_code=201, tags=["api"], response_model=None)
-def api_create(body: TicketCreate, conn: sqlite3.Connection = Depends(get_conn)) -> svc.Row:
+def api_create(body: TicketCreate, conn: Connection = Depends(get_conn)) -> svc.Row:
     tid = svc.create_ticket(conn, body, ROUTER)
     return svc.ticket_detail(conn, tid)
 
 
 @app.get("/api/tickets/{ticket_id}", tags=["api"], response_model=None)
-def api_detail(ticket_id: int, conn: sqlite3.Connection = Depends(get_conn)) -> svc.Row:
+def api_detail(ticket_id: int, conn: Connection = Depends(get_conn)) -> svc.Row:
     return svc.ticket_detail(conn, ticket_id)
 
 
 @app.post("/api/tickets/{ticket_id}/transition", tags=["api"], response_model=None)
 def api_transition(
-    ticket_id: int, body: TransitionRequest, conn: sqlite3.Connection = Depends(get_conn)
+    ticket_id: int, body: TransitionRequest, conn: Connection = Depends(get_conn)
 ) -> svc.Row:
     svc.transition(conn, ticket_id, body.actor_id, body.to_status, body.note)
     return svc.ticket_detail(conn, ticket_id)
@@ -155,7 +158,7 @@ def api_transition(
 
 @app.post("/api/tickets/{ticket_id}/assign", tags=["api"], response_model=None)
 def api_assign(
-    ticket_id: int, body: AssignRequest, conn: sqlite3.Connection = Depends(get_conn)
+    ticket_id: int, body: AssignRequest, conn: Connection = Depends(get_conn)
 ) -> svc.Row:
     svc.assign(conn, ticket_id, body.actor_id, body.assignee_id)
     return svc.ticket_detail(conn, ticket_id)
@@ -163,7 +166,7 @@ def api_assign(
 
 @app.post("/api/tickets/{ticket_id}/comments", status_code=201, tags=["api"], response_model=None)
 def api_comment(
-    ticket_id: int, body: CommentCreate, conn: sqlite3.Connection = Depends(get_conn)
+    ticket_id: int, body: CommentCreate, conn: Connection = Depends(get_conn)
 ) -> svc.Row:
     svc.add_comment(conn, ticket_id, body)
     return svc.ticket_detail(conn, ticket_id)
@@ -174,14 +177,14 @@ def api_comment(
 # demo the requester and agent views side by side.
 
 
-def current_user(request: Request, conn: sqlite3.Connection) -> svc.Row:
+def current_user(request: Request, conn: Connection) -> svc.Row:
     try:
         return svc.get_user(conn, int(request.cookies.get("acting_as", "")))
     except (ValueError, svc.NotFound):
         return svc.list_users(conn, roles={"agent"})[0]
 
 
-def render(request: Request, conn: sqlite3.Connection, name: str, **ctx: Any) -> HTMLResponse:
+def render(request: Request, conn: Connection, name: str, **ctx: Any) -> HTMLResponse:
     user = current_user(request, conn)
     ctx.update(
         users=svc.list_users(conn),
@@ -213,7 +216,7 @@ def index(
     status: str = "",
     queue: str = "",
     mine: bool = False,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: Connection = Depends(get_conn),
 ) -> HTMLResponse:
     user = current_user(request, conn)
     agent = svc.is_agent(user)
@@ -243,7 +246,7 @@ def index(
 
 
 @app.get("/tickets/new", response_class=HTMLResponse, include_in_schema=False)
-def new_ticket_form(request: Request, conn: sqlite3.Connection = Depends(get_conn)) -> HTMLResponse:
+def new_ticket_form(request: Request, conn: Connection = Depends(get_conn)) -> HTMLResponse:
     return render(
         request,
         conn,
@@ -263,7 +266,7 @@ def create_ticket_form(
     impact: str = Form("medium"),
     urgency: str = Form("medium"),
     category: str = Form(""),
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: Connection = Depends(get_conn),
 ) -> RedirectResponse:
     user = current_user(request, conn)
     try:
@@ -285,9 +288,7 @@ def create_ticket_form(
 
 
 @app.get("/tickets/{ticket_id}", response_class=HTMLResponse, include_in_schema=False)
-def ticket_page(
-    request: Request, ticket_id: int, conn: sqlite3.Connection = Depends(get_conn)
-) -> Response:
+def ticket_page(request: Request, ticket_id: int, conn: Connection = Depends(get_conn)) -> Response:
     user = current_user(request, conn)
     try:
         detail = svc.ticket_detail(conn, ticket_id, viewer=user)
@@ -309,7 +310,7 @@ def comment_form(
     ticket_id: int,
     body: str = Form(""),
     internal: bool = Form(False),
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: Connection = Depends(get_conn),
 ) -> RedirectResponse:
     user = current_user(request, conn)
     try:
@@ -330,7 +331,7 @@ def transition_form(
     ticket_id: int,
     to_status: str = Form(...),
     note: str = Form(""),
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: Connection = Depends(get_conn),
 ) -> RedirectResponse:
     user = current_user(request, conn)
     try:
@@ -345,7 +346,7 @@ def assign_form(
     request: Request,
     ticket_id: int,
     assignee_id: str = Form(""),
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: Connection = Depends(get_conn),
 ) -> RedirectResponse:
     user = current_user(request, conn)
     try:

@@ -1,8 +1,8 @@
 from fastapi.testclient import TestClient
 
 
-def test_api_and_ui(tmp_path, monkeypatch):
-    monkeypatch.setenv("HELPDESK_DB", str(tmp_path / "t.db"))
+def test_api_and_ui(empty_db, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", empty_db)
     monkeypatch.setenv("HELPDESK_DEMO", "1")
     from app.main import app
 

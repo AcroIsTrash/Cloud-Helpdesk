@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
-import sqlite3
 from datetime import datetime, timedelta
 
+from sqlalchemy import Connection, func, select
+
 from . import services as svc
+from .db import tickets
 from .models import CommentCreate, Level, Status, TicketCreate
 from .routing import Router
 
 
-def seed_demo(conn: sqlite3.Connection, router: Router) -> None:
-    if conn.execute("SELECT COUNT(*) FROM tickets").fetchone()[0]:
+def seed_demo(conn: Connection, router: Router) -> None:
+    if conn.scalar(select(func.count()).select_from(tickets)):
         return
     u = {r["email"].split("@")[0]: r["id"] for r in svc.list_users(conn)}
     now = svc.utcnow()

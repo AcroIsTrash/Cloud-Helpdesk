@@ -3,7 +3,6 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from app import services as svc
-from app.db import connect, init_db
 from app.models import (
     Category,
     CommentCreate,
@@ -17,14 +16,6 @@ from app.routing import KeywordRouter, RoutingDecision
 
 T0 = datetime(2026, 1, 5, 9, 0, tzinfo=UTC)
 router = KeywordRouter()
-
-
-@pytest.fixture
-def conn():
-    c = connect(":memory:")
-    init_db(c)
-    yield c
-    c.close()
 
 
 @pytest.fixture
@@ -296,3 +287,10 @@ def test_answered_then_cancelled_keeps_the_response_clock(conn, ids):
     sla = svc.sla_status(svc.ticket_detail(conn, tid)["ticket"], at(60))
     assert sla["response"]["state"] == "met"
     assert sla["resolution"]["state"] == "cancelled"
+
+
+def test_ticket_list_puts_p1_first(conn, ids):
+    p4 = make(conn, ids, impact=Level.LOW, urgency=Level.LOW)
+    p1 = make(conn, ids, impact=Level.HIGH, urgency=Level.HIGH)
+    p2 = make(conn, ids, impact=Level.HIGH, urgency=Level.MEDIUM)
+    assert [t["id"] for t in svc.list_tickets(conn)] == [p1, p2, p4]

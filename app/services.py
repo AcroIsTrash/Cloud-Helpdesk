@@ -7,10 +7,14 @@ timeline on a ticket is a complete record of who did what and when.
 from __future__ import annotations
 
 import logging
-import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from sqlalchemy import Connection, Select, func, insert, select, update
+
+from .db import comments, events, tickets, users
 from .models import (
     ALLOWED_TRANSITIONS,
     QUEUE_FOR_CATEGORY,
@@ -52,47 +56,56 @@ class PermissionDenied(TicketError):
 
 
 def utcnow() -> datetime:
-    return datetime.now(UTC)
+    # Whole seconds: Postgres would keep microseconds and change the API output.
+    return datetime.now(UTC).replace(microsecond=0)
 
 
 def _iso(dt: datetime) -> str:
     return dt.isoformat(timespec="seconds")
 
 
-def _parse(value: str | None) -> datetime | None:
-    return datetime.fromisoformat(value) if value else None
+@contextmanager
+def _atomic(conn: Connection) -> Iterator[None]:
+    """Commit everything since the transaction began (its reads included), or nothing.
 
-
-def _parse_required(value: str) -> datetime:
-    """Parse a timestamp column that is never NULL where it is read."""
-    return datetime.fromisoformat(value)
+    SQLAlchemy begins a transaction on the first statement, so the checks a
+    command makes and the writes that follow share one transaction, and an
+    Event never commits without the change it records.
+    """
+    try:
+        yield
+    except BaseException:
+        conn.rollback()
+        raise
+    conn.commit()
 
 
 def is_agent(user: Row) -> bool:
     return user["role"] in AGENT_ROLES
 
 
-def get_user(conn: sqlite3.Connection, user_id: int) -> Row:
-    row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+def get_user(conn: Connection, user_id: int) -> Row:
+    row = conn.execute(select(users).where(users.c.id == user_id)).mappings().first()
     if row is None:
         raise NotFound(f"user {user_id} not found")
     return dict(row)
 
 
-def list_users(conn: sqlite3.Connection, roles: set[str] | None = None) -> list[Row]:
-    rows = [dict(r) for r in conn.execute("SELECT * FROM users ORDER BY role, name")]
+def list_users(conn: Connection, roles: set[str] | None = None) -> list[Row]:
+    query = select(users).order_by(users.c.role, users.c.name)
+    rows = [dict(r) for r in conn.execute(query).mappings()]
     return [r for r in rows if roles is None or r["role"] in roles]
 
 
-def _ticket(conn: sqlite3.Connection, ticket_id: int) -> Row:
-    row = conn.execute("SELECT * FROM tickets WHERE id = ?", (ticket_id,)).fetchone()
+def _ticket(conn: Connection, ticket_id: int) -> Row:
+    row = conn.execute(select(tickets).where(tickets.c.id == ticket_id)).mappings().first()
     if row is None:
         raise NotFound(f"ticket {ticket_id} not found")
     return dict(row)
 
 
 def _log(
-    conn: sqlite3.Connection,
+    conn: Connection,
     ticket_id: int,
     actor_id: int | None,
     kind: str,
@@ -100,20 +113,19 @@ def _log(
     now: datetime,
 ) -> None:
     conn.execute(
-        "INSERT INTO events (ticket_id, actor_id, kind, detail, created_at) VALUES (?, ?, ?, ?, ?)",
-        (ticket_id, actor_id, kind, detail, _iso(now)),
+        insert(events).values(
+            ticket_id=ticket_id, actor_id=actor_id, kind=kind, detail=detail, created_at=now
+        )
     )
 
 
-def _update(conn: sqlite3.Connection, ticket_id: int, now: datetime, **fields: Any) -> None:
-    fields["updated_at"] = _iso(now)
-    cols = ", ".join(f"{k} = ?" for k in fields)  # keys are internal, never user input
-    conn.execute(f"UPDATE tickets SET {cols} WHERE id = ?", (*fields.values(), ticket_id))
+def _update(conn: Connection, ticket_id: int, now: datetime, **fields: Any) -> None:
+    conn.execute(update(tickets).where(tickets.c.id == ticket_id).values(updated_at=now, **fields))
 
 
 def _unpause(t: Row, now: datetime) -> Row:
     """Fields that stop the SLA pause clock and bank the paused time."""
-    paused = int((now - _parse_required(t["paused_since"])).total_seconds())
+    paused = int((now - t["paused_since"]).total_seconds())
     return {"paused_seconds": t["paused_seconds"] + paused, "paused_since": None}
 
 
@@ -154,7 +166,7 @@ def _safe_route(router: Router, title: str, description: str) -> tuple[RoutingDe
 
 
 def create_ticket(
-    conn: sqlite3.Connection, data: TicketCreate, router: Router, now: datetime | None = None
+    conn: Connection, data: TicketCreate, router: Router, now: datetime | None = None
 ) -> int:
     now = now or utcnow()
     get_user(conn, data.requester_id)
@@ -168,28 +180,25 @@ def create_ticket(
     else:
         decision, fell_back = _safe_route(router, data.title, data.description)
 
-    with conn:
-        cur = conn.execute(
-            """INSERT INTO tickets (title, description, requester_id, queue, category,
-                   impact, urgency, priority, status, created_at, updated_at, routing_reason)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                data.title.strip(),
-                data.description.strip(),
-                data.requester_id,
-                decision.queue,
-                decision.category.value,
-                data.impact.value,
-                data.urgency.value,
-                priority.value,
-                Status.NEW.value,
-                _iso(now),
-                _iso(now),
-                decision.reason,
-            ),
-        )
-        tid = cur.lastrowid
-        assert tid is not None  # set by the INSERT above
+    with _atomic(conn):
+        tid: int = conn.execute(
+            insert(tickets)
+            .values(
+                title=data.title.strip(),
+                description=data.description.strip(),
+                requester_id=data.requester_id,
+                queue=decision.queue,
+                category=decision.category.value,
+                impact=data.impact.value,
+                urgency=data.urgency.value,
+                priority=priority.value,
+                status=Status.NEW.value,
+                created_at=now,
+                updated_at=now,
+                routing_reason=decision.reason,
+            )
+            .returning(tickets.c.id)
+        ).scalar_one()
         _log(
             conn,
             tid,
@@ -213,7 +222,7 @@ def create_ticket(
 
 
 def transition(
-    conn: sqlite3.Connection,
+    conn: Connection,
     ticket_id: int,
     actor_id: int,
     to_status: Status,
@@ -243,19 +252,19 @@ def transition(
     if current == Status.PENDING:
         fields.update(_unpause(t, now))
     if to_status == Status.PENDING:
-        fields["paused_since"] = _iso(now)
+        fields["paused_since"] = now
     if to_status == Status.RESOLVED:
-        fields.update(resolved_at=_iso(now), resolution=note)
+        fields.update(resolved_at=now, resolution=note)
     if current == Status.RESOLVED and to_status == Status.OPEN:
         fields.update(resolved_at=None, resolution=None)  # reopen: clock keeps running
     if to_status == Status.CLOSED:
-        fields["closed_at"] = _iso(now)
+        fields["closed_at"] = now
 
     auto_assign = to_status == Status.IN_PROGRESS and t["assignee_id"] is None and is_agent(actor)
     if auto_assign:
         fields["assignee_id"] = actor_id
 
-    with conn:
+    with _atomic(conn):
         _update(conn, ticket_id, now, **fields)
         _log(
             conn,
@@ -277,7 +286,7 @@ def transition(
 
 
 def assign(
-    conn: sqlite3.Connection,
+    conn: Connection,
     ticket_id: int,
     actor_id: int,
     assignee_id: int | None,
@@ -313,14 +322,14 @@ def assign(
             fields["status"] = Status.OPEN.value
             logs.append(("status", "new → open: triaged by assignment"))
 
-    with conn:
+    with _atomic(conn):
         _update(conn, ticket_id, now, **fields)
         for kind, detail in logs:
             _log(conn, ticket_id, actor_id, kind, detail, now)
 
 
 def add_comment(
-    conn: sqlite3.Connection, ticket_id: int, data: CommentCreate, now: datetime | None = None
+    conn: Connection, ticket_id: int, data: CommentCreate, now: datetime | None = None
 ) -> int:
     now = now or utcnow()
     t = _ticket(conn, ticket_id)
@@ -334,15 +343,21 @@ def add_comment(
     if not agent and author["id"] != t["requester_id"]:
         raise PermissionDenied("requesters can only comment on their own tickets")
 
-    with conn:
-        cur = conn.execute(
-            "INSERT INTO comments (ticket_id, author_id, body, internal, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (ticket_id, author["id"], data.body.strip(), int(data.internal), _iso(now)),
-        )
+    with _atomic(conn):
+        comment_id: int = conn.execute(
+            insert(comments)
+            .values(
+                ticket_id=ticket_id,
+                author_id=author["id"],
+                body=data.body.strip(),
+                internal=data.internal,
+                created_at=now,
+            )
+            .returning(comments.c.id)
+        ).scalar_one()
         if agent and not data.internal and t["first_response_at"] is None:
             # Internal notes don't count: the SLA measures the *customer's* wait.
-            _update(conn, ticket_id, now, first_response_at=_iso(now))
+            _update(conn, ticket_id, now, first_response_at=now)
             _log(
                 conn,
                 ticket_id,
@@ -363,62 +378,65 @@ def add_comment(
             )
         else:
             _update(conn, ticket_id, now)
-    assert cur.lastrowid is not None  # set by the INSERT above
-    return cur.lastrowid
+    return comment_id
 
 
 # ---- queries -------------------------------------------------------------
 
-_TICKET_SELECT = """
-    SELECT t.*, r.name AS requester_name, a.name AS assignee_name
-    FROM tickets t
-    JOIN users r ON r.id = t.requester_id
-    LEFT JOIN users a ON a.id = t.assignee_id
-"""
+_requester = users.alias("r")
+_assignee = users.alias("a")
+
+
+def _ticket_select() -> Select[Any]:
+    """Tickets with the requester's and assignee's names joined on."""
+    return select(
+        tickets,
+        _requester.c.name.label("requester_name"),
+        _assignee.c.name.label("assignee_name"),
+    ).select_from(
+        tickets.join(_requester, _requester.c.id == tickets.c.requester_id).outerjoin(
+            _assignee, _assignee.c.id == tickets.c.assignee_id
+        )
+    )
 
 
 def list_tickets(
-    conn: sqlite3.Connection,
+    conn: Connection,
     status: Status | None = None,
     include_closed: bool = False,
     queue: str | None = None,
     assignee_id: int | None = None,
     requester_id: int | None = None,
 ) -> list[Row]:
-    where: list[str] = []
-    params: list[str | int] = []
+    query = _ticket_select()
     if status is not None:
-        where.append("t.status = ?")
-        params.append(status.value)
+        query = query.where(tickets.c.status == status.value)
     elif not include_closed:
-        where.append("t.status != 'closed'")
+        query = query.where(tickets.c.status != Status.CLOSED.value)
     for col, val in (
-        ("t.queue", queue),
-        ("t.assignee_id", assignee_id),
-        ("t.requester_id", requester_id),
+        (tickets.c.queue, queue),
+        (tickets.c.assignee_id, assignee_id),
+        (tickets.c.requester_id, requester_id),
     ):
         if val is not None:
-            where.append(f"{col} = ?")
-            params.append(val)
-    sql = _TICKET_SELECT + (" WHERE " + " AND ".join(where) if where else "")
-    sql += " ORDER BY t.priority, t.created_at"
-    return [dict(r) for r in conn.execute(sql, params)]
+            query = query.where(col == val)
+    # "P1" < "P2" < ... as text, so priority order is P1 first.
+    query = query.order_by(tickets.c.priority, tickets.c.created_at)
+    return [dict(r) for r in conn.execute(query).mappings()]
 
 
-def status_counts(conn: sqlite3.Connection, requester_id: int | None = None) -> dict[str, int]:
+def status_counts(conn: Connection, requester_id: int | None = None) -> dict[str, int]:
     counts = {s.value: 0 for s in Status}
-    sql = "SELECT status, COUNT(*) FROM tickets"
-    params: list[int] = []
+    query = select(tickets.c.status, func.count()).group_by(tickets.c.status)
     if requester_id is not None:
-        sql += " WHERE requester_id = ?"
-        params.append(requester_id)
-    for status, n in conn.execute(sql + " GROUP BY status", params):
+        query = query.where(tickets.c.requester_id == requester_id)
+    for status, n in conn.execute(query):
         counts[status] = n
     return counts
 
 
-def ticket_detail(conn: sqlite3.Connection, ticket_id: int, viewer: Row | None = None) -> Row:
-    row = conn.execute(_TICKET_SELECT + " WHERE t.id = ?", (ticket_id,)).fetchone()
+def ticket_detail(conn: Connection, ticket_id: int, viewer: Row | None = None) -> Row:
+    row = conn.execute(_ticket_select().where(tickets.c.id == ticket_id)).mappings().first()
     if row is None:
         raise NotFound(f"ticket {ticket_id} not found")
     ticket = dict(row)
@@ -426,28 +444,29 @@ def ticket_detail(conn: sqlite3.Connection, ticket_id: int, viewer: Row | None =
         raise PermissionDenied("you can only view your own tickets")
 
     show_internal = viewer is None or is_agent(viewer)
-    comments = [
-        dict(r) | {"type": "comment", "internal": bool(r["internal"])}
-        for r in conn.execute(
-            "SELECT c.*, u.name AS author_name FROM comments c "
-            "JOIN users u ON u.id = c.author_id WHERE c.ticket_id = ? ORDER BY c.id",
-            (ticket_id,),
-        )
-        if show_internal or not r["internal"]
-    ]
-    events = [
-        dict(r) | {"type": "event"}
-        for r in conn.execute(
-            "SELECT e.*, u.name AS actor_name FROM events e "
-            "LEFT JOIN users u ON u.id = e.actor_id WHERE e.ticket_id = ? ORDER BY e.id",
-            (ticket_id,),
-        )
-    ]
-    timeline = sorted(comments + events, key=lambda x: (x["created_at"], x["type"] == "comment"))
+    comment_query = (
+        select(comments, users.c.name.label("author_name"))
+        .join(users, users.c.id == comments.c.author_id)
+        .where(comments.c.ticket_id == ticket_id)
+        .order_by(comments.c.id)
+    )
+    if not show_internal:
+        comment_query = comment_query.where(comments.c.internal.is_(False))
+    comment_rows = [dict(r) | {"type": "comment"} for r in conn.execute(comment_query).mappings()]
+    event_query = (
+        select(events, users.c.name.label("actor_name"))
+        .outerjoin(users, users.c.id == events.c.actor_id)
+        .where(events.c.ticket_id == ticket_id)
+        .order_by(events.c.id)
+    )
+    event_rows = [dict(r) | {"type": "event"} for r in conn.execute(event_query).mappings()]
+    timeline = sorted(
+        comment_rows + event_rows, key=lambda x: (x["created_at"], x["type"] == "comment")
+    )
     return {
         "ticket": ticket,
-        "comments": comments,
-        "events": events,
+        "comments": comment_rows,
+        "events": event_rows,
         "timeline": timeline,
         "sla": sla_status(ticket),
     }
@@ -493,9 +512,10 @@ def sla_status(t: Row, now: datetime | None = None) -> Row:
     """
     now = now or utcnow()
     response_target, resolution_target = SLA_TARGETS[Priority(t["priority"])]
-    created = _parse_required(t["created_at"])
-    resolved, closed = _parse(t["resolved_at"]), _parse(t["closed_at"])
-    responded = _parse(t["first_response_at"])
+    created: datetime = t["created_at"]
+    resolved: datetime | None = t["resolved_at"]
+    closed: datetime | None = t["closed_at"]
+    responded: datetime | None = t["first_response_at"]
     cancelled = closed is not None and resolved is None
 
     if cancelled and responded is None:
@@ -510,7 +530,7 @@ def sla_status(t: Row, now: datetime | None = None) -> Row:
     else:
         paused = timedelta(seconds=t["paused_seconds"])
         if t["paused_since"]:
-            paused += now - _parse_required(t["paused_since"])
+            paused += now - t["paused_since"]
         resolution = _clock(
             (resolved or now) - created - paused, resolution_target, done=resolved is not None
         )

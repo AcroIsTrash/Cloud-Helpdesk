@@ -4,8 +4,6 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 
-# The SQLite database is generated on first run (see HELPDESK_DB).
-*.db
-*.db-journal
+.mypy_cache/
 
 .env
