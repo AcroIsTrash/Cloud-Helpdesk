@@ -18,6 +18,19 @@ Infer the repo from `git remote -v`; `gh` does this automatically when run insid
 
 GitHub GraphQL is blocked there, so `gh issue list/view/create/edit` fail with a 403. Use the REST API instead (`gh api repos/AcroIsTrash/Cloud-Helpdesk/issues ...`, `gh api --method POST ... -f title=... -f body=...`) or the `mcp__github__*` tools (`issue_read`, `issue_write`, `list_issues`, `search_issues`, `add_issue_comment`, `sub_issue_write`). The REST routes under **Blocking** and **Make an issue a sub-issue** work as written.
 
+**Ticket graph of a spec** (which tickets are open and what blocks them), in one line per ticket:
+
+```bash
+gh api repos/AcroIsTrash/Cloud-Helpdesk/issues/<spec>/sub_issues \
+  --jq '.[] | "#\(.number) \(.state) blocked_by=\(.issue_dependencies_summary.blocked_by) \(.title)"'
+```
+
+Prefer this to `issue_read get_sub_issues`, which returns every ticket's full body (tens of thousands of characters for one spec).
+
+## Landing a ticket
+
+`main` is protected: work reaches it only through a PR with green CI. When `/implement` finishes a ticket, push the branch and open a PR whose body says `Closes #<ticket>`. A ticket blocked by an unmerged one branches from its blocker's branch, and its PR targets that branch until the blocker merges.
+
 ## Pull requests as a triage surface
 
 **PRs as a request surface: no.** _(Set to `yes` if this repo treats external PRs as feature requests; `/triage` reads this flag.)_
