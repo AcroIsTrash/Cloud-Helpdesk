@@ -1,6 +1,6 @@
 # Stack
 
-Status: **decided**. Grilled into ADRs 0001–0013 (`docs/adr/`); change it only through a new ADR. Two principles drive it:
+Status: **decided**. Grilled into ADRs 0001–0013 (`docs/adr/`). Changing a *choice* here takes a new ADR; wording that tracks the code (a renamed page, a moved file) is an ordinary edit. Two principles drive it:
 **keep what already works** (from `helpdesk` and `aws-agent`) and **stay
 AWS-native** (one identity system, IAM instead of API keys, one story).
 

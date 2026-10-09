@@ -343,8 +343,8 @@ pass against Postgres with their assertions unchanged.
   API test's requests run on connections of their own.
 - **Priority order.** `ORDER BY priority` on text works because `"P1" < "P2"`
   in any collation. That's an assumption, so a test now pins "P1 first".
-- **Docker Hub rate limits.** In a sandbox without image pulls, testcontainers
-  can't start. `TEST_DATABASE_URL` points the suite at an existing Postgres
+- **Docker Hub rate limits.** Docker Hub sometimes refuses image pulls from the
+  agent sandbox (429), and then testcontainers can't start. `TEST_DATABASE_URL` points the suite at an existing Postgres
   instead. For cloud agent sessions, `.claude/hooks/session-start.sh` starts
   the container's own Postgres and sets it, so every session can run the tests.
   Your machine and CI still use Docker.
@@ -357,9 +357,9 @@ pass against Postgres with their assertions unchanged.
   GitHub's container registry (`ghcr.io`, the usual home of the uv image) was
   blocked outright. The fix kept the `Dockerfile` clean for everyone else: uv
   comes from its Docker Hub mirror (`astral/uv`, pinned by digest like the
-  base image), and the sandbox verifies with a throwaway copy of the
-  `Dockerfile` that only mounts the proxy CA as a build secret. CI builds the
-  real `Dockerfile` unmodified.
+  base image), and in the sandbox `scripts/sandbox-build.sh` builds a
+  throwaway copy of the `Dockerfile` that only mounts the proxy CA as a build
+  secret. CI builds the real `Dockerfile` unmodified.
 
 ## Known simplifications (for now)
 
