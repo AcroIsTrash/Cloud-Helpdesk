@@ -21,7 +21,6 @@ class Settings:
     environment: Environment
     dev_login: bool  # the dev login picker: anyone can log in as anyone
     session_secret: str  # signs the picker's session cookie
-    demo: bool  # load demo tickets on an empty database
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> Settings:
@@ -38,5 +37,4 @@ class Settings:
             dev_login=dev_login,
             # Without a fixed secret, sessions last until the app restarts.
             session_secret=env.get("HELPDESK_SESSION_SECRET") or secrets.token_urlsafe(32),
-            demo=env.get("HELPDESK_DEMO", "1") == "1",
         )

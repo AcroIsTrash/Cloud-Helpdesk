@@ -1,0 +1,52 @@
+# One command, a working service desk: `docker compose up`, then open
+# http://localhost:8000. Shaped like the AWS deployment, costing nothing.
+#
+#   db       Postgres with pgvector, as RDS will be
+#   migrate  one-off: apply migrations, load demo data, exit (ADR-0008)
+#   app      starts only once migrate has succeeded
+#
+# No volume: like the AWS environment (ADR-0001), each `docker compose down`
+# discards the data and the next `up` reseeds it.
+
+x-database-url: &database-url postgresql+psycopg://helpdesk:helpdesk@db:5432/helpdesk
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: helpdesk
+      POSTGRES_PASSWORD: helpdesk  # local only; in AWS it comes from Secrets Manager
+      POSTGRES_DB: helpdesk
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "helpdesk", "-d", "helpdesk"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  migrate:
+    build: .
+    image: cloud-helpdesk:local
+    command: ["sh", "-c", "alembic upgrade head && python -m app.seed"]
+    environment:
+      DATABASE_URL: *database-url
+    depends_on:
+      db:
+        condition: service_healthy
+
+  app:
+    build: .  # the same image as migrate; listed so compose builds it, never pulls it
+    image: cloud-helpdesk:local
+    environment:
+      DATABASE_URL: *database-url
+      HELPDESK_ENV: local
+      HELPDESK_DEV_LOGIN: "1"  # the login picker; the app refuses this in aws
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    depends_on:
+      migrate:
+        condition: service_completed_successfully

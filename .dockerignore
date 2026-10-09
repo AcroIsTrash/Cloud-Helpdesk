@@ -1,0 +1,10 @@
+# Allowlist: the build context holds only what the Dockerfile copies, so tests,
+# evals, docs, .git and local virtualenvs can never end up in the image.
+*
+!pyproject.toml
+!uv.lock
+!.python-version
+!alembic.ini
+!app/
+!migrations/
+**/__pycache__

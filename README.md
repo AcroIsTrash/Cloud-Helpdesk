@@ -28,14 +28,16 @@ terms are defined in the [glossary](GLOSSARY.md).
 
 The app has been imported from [`helpdesk`](https://github.com/AcroIsTrash/helpdesk)
 with its behaviour unchanged, and now runs on PostgreSQL with Alembic
-migrations. Every request now belongs to a logged-in person. Deactivation,
-docker-compose and the AWS deployment come next; the
+migrations. Every request now belongs to a logged-in person, and
+`docker compose up` runs the whole thing locally. Deactivation and the AWS
+deployment come next; the
 [stack](docs/stack.md) lists every piece and why it was chosen.
 
 - [x] Import the app on Python 3.13, with CI
 - [x] Postgres + Alembic, tests against a real database
 - [x] A login seam: one `current_user` for pages and API, a dev login picker
-- [ ] Phase 1 (rest): Deactivation, docker-compose
+- [x] One command to run it: Dockerfile, docker-compose, seed, `/healthz`
+- [ ] Phase 1 (rest): Deactivation
 - [ ] Phase 2: Terraform (VPC, ECS Fargate, RDS, ALB) and a deploy pipeline
 - [ ] Phase 3: an LLM router, evaluated against the keyword baseline
 - [ ] Phase 4: suggested replies, summaries, duplicate detection
@@ -77,28 +79,75 @@ it, so each rule is enforced in exactly one place.
 
 ## Run it
 
-Requires [uv](https://docs.astral.sh/uv/) (it installs Python 3.13 and the
-exact dependency versions in `uv.lock`) and a PostgreSQL 16 database. Docker
-gives you one:
+One command, with only [Docker](https://docs.docker.com/get-docker/) installed:
 
 ```bash
-docker run -d --name helpdesk-db -p 5432:5432 \
-  -e POSTGRES_USER=helpdesk -e POSTGRES_PASSWORD=helpdesk -e POSTGRES_DB=helpdesk \
-  pgvector/pgvector:pg16
-uv sync
-uv run alembic upgrade head      # creates the schema; the app never does
-HELPDESK_DEV_LOGIN=1 uv run python -m uvicorn app.main:app --reload
+docker compose up
 ```
 
 Open http://localhost:8000 and pick someone on the login page; the API docs are
-at http://localhost:8000/docs. The first launch creates demo users and tickets.
-Log out (top right) and back in as someone else to compare a Requester's view
-with an Agent's.
+at http://localhost:8000/docs. Log out (top right) and back in as someone else
+to compare a Requester's view with an Agent's. `docker compose down` throws the
+data away, and the next `up` starts fresh, the way the AWS environment does
+([ADR-0001](docs/adr/0001-on-demand-environment.md)).
+
+The stack is shaped like production, at zero cost:
+
+```mermaid
+flowchart LR
+    db[(db<br/>Postgres 16 + pgvector)]
+    migrate[migrate<br/>alembic upgrade head<br/>python -m app.seed]
+    app[app<br/>:8000]
+    db -- healthy --> migrate -- exited 0 --> app
+```
+
+- **db** is the `pgvector/pgvector` image, the same Postgres the tests use.
+- **migrate** is a one-off: it applies the migrations, loads the demo data, and
+  exits. The app starts only once it has succeeded.
+- **app** runs the same image, built from this checkout by the `Dockerfile`.
+
+**Why the migrations are a separate step.** If each app container migrated on
+startup, the two to four tasks of a deploy would race to change the same
+schema, and a failed migration would crash-loop every task at once. As its own
+step, a migration runs once, and a bad one stops the deploy before any new
+code serves traffic. In AWS this step becomes a one-off ECS task
+([ADR-0008](docs/adr/0008-migrations-run-as-a-one-off-ecs-task.md)). The demo
+data follows the same rule: `python -m app.seed` is its own command, separate
+from the migrations, and running it twice changes nothing
+(`tests/test_seed.py`). It's demo data only, never reused as eval data
+([ADR-0013](docs/adr/0013-routing-eval-is-hand-labeled-and-runs-on-router-changes.md)).
+
+**The image** (`Dockerfile`) is a two-stage build on `python:3.13-slim`, pinned
+by digest, so a rebuild can't silently pick up a different base. Dependencies
+come from `uv sync --frozen --no-dev`: exactly the lockfile, without pytest,
+ruff or mypy. A `.dockerignore` allowlist means only the app and its
+migrations can reach the image, never tests, evals or `.git`. It runs as a
+non-root user, and every setting comes from environment variables, so the same
+image runs here and in ECS. `scripts/check-image.sh` proves all of that by
+listing what's actually inside, and CI runs it plus a full `docker compose up`.
+
+`GET /healthz` is for the load balancer: no login, one `SELECT 1`. It returns
+200 when the database answers and 503 when it doesn't, so the ALB can drop a
+task that lost its database.
+
+### Without Docker for the app
+
+For a fast edit-reload loop, run the app with uv (it installs Python 3.13 and
+the exact versions in `uv.lock`) against the compose database:
+
+```bash
+docker compose up -d db
+export DATABASE_URL=postgresql+psycopg://helpdesk:helpdesk@localhost:5432/helpdesk
+uv sync
+uv run alembic upgrade head      # creates the schema; the app never does
+uv run python -m app.seed        # demo people and tickets; safe to rerun
+HELPDESK_DEV_LOGIN=1 uv run python -m uvicorn app.main:app --reload
+```
 
 | Setting | Default | Effect |
 |---|---|---|
 | `DATABASE_URL` | `postgresql+psycopg://helpdesk:helpdesk@localhost:5432/helpdesk` | The database the app and Alembic use |
-| `HELPDESK_DEMO` | `1` | Set to `0` to start without demo tickets |
+| `HELPDESK_DEMO` | `1` | Read by `python -m app.seed`: `0` loads people only, no demo tickets |
 | `HELPDESK_DEV_LOGIN` | `0` | Set to `1` to enable the dev login picker (anyone can log in as anyone) |
 | `HELPDESK_ENV` | `local` | `local` or `aws`; the app refuses to start with the picker on in `aws` |
 | `HELPDESK_SESSION_SECRET` | random per start | Signs the session cookie; without it, a restart logs everyone out |
@@ -119,10 +168,12 @@ the tables before each test. To use a database you already have running
 instead, set `TEST_DATABASE_URL` (it gets truncated, so make it a throwaway).
 
 The rule tests pass a fixed clock into every function, so SLA timing is tested
-to the minute. CI (`.github/workflows/ci.yml`) runs four jobs on every push and
-pull request: `lint`, `typecheck`, `test`, and `migrations`, which upgrades an
+to the minute. CI (`.github/workflows/ci.yml`) runs five jobs on every push and
+pull request: `lint`, `typecheck`, `test`, `migrations`, which upgrades an
 empty database to head and then fails if autogenerate still finds a difference
-from the declared tables (a table changed without a migration).
+from the declared tables (a table changed without a migration), and `image`,
+which builds the image, checks its contents and runs `docker compose up` to the
+point of serving demo data.
 
 The API contract is pinned too: `tests/openapi.json` is a snapshot of the
 OpenAPI schema, and the suite fails if the schema drifts from it. This caught
@@ -202,12 +253,14 @@ app/
   services.py   business rules; knows nothing about HTTP
   routing.py    Router interface + KeywordRouter baseline
   db.py         table declarations (SQLAlchemy Core) and the engine
-  seed.py       demo users and tickets
+  seed.py       demo people and tickets: `python -m app.seed`
   auth.py       identity sources: who is making a request (the login seam)
   config.py     settings from environment variables, and the startup guard
   main.py       FastAPI: JSON API under /api, HTML pages elsewhere
   templates/    Jinja2 pages
 migrations/     Alembic migrations, generated from app/db.py
+scripts/        check-image.sh: what's inside the image
+Dockerfile      the app image; docker-compose.yml runs it with Postgres
 tests/          pytest (conftest.py starts Postgres)
 docs/adr/       architecture decisions
 docs/stack.md   the planned stack and why
@@ -277,9 +330,11 @@ pass against Postgres with their assertions unchanged.
   checks it leaves the database empty.
 - **Seeding raced the same way.** Demo data is "if the table is empty, insert",
   so 2–4 tasks booting together all saw an empty table: in a test with four
-  simultaneous starts, three crashed on the duplicate email. Seeding now runs
-  under a Postgres advisory lock, so one task seeds while the others wait,
-  then find the data and skip.
+  simultaneous starts, three crashed on the duplicate email. Seeding first
+  moved under a Postgres advisory lock, so one task seeds while the others
+  wait, then find the data and skip. Then it left the app altogether: like the
+  migrations, it's now a one-off step (`python -m app.seed`) that runs once
+  per bring-up. The lock stays, for two seed runs that overlap.
 - **Test isolation got harder.** A fresh in-memory SQLite per test was free.
   Starting a Postgres per test would be slow, so there is one container per
   session and the tables are truncated before each test (`RESTART IDENTITY`,
@@ -293,6 +348,18 @@ pass against Postgres with their assertions unchanged.
   instead. For cloud agent sessions, `.claude/hooks/session-start.sh` starts
   the container's own Postgres and sets it, so every session can run the tests.
   Your machine and CI still use Docker.
+
+## Friction points: the image
+
+- **The build couldn't reach the internet from the agent sandbox.** Cloud
+  agent sessions send all HTTPS through a proxy with its own CA. A `docker
+  build` doesn't inherit either, so `uv sync` failed inside the build, and
+  GitHub's container registry (`ghcr.io`, the usual home of the uv image) was
+  blocked outright. The fix kept the `Dockerfile` clean for everyone else: uv
+  comes from its Docker Hub mirror (`astral/uv`, pinned by digest like the
+  base image), and the sandbox verifies with a throwaway copy of the
+  `Dockerfile` that only mounts the proxy CA as a build secret. CI builds the
+  real `Dockerfile` unmodified.
 
 ## Known simplifications (for now)
 
