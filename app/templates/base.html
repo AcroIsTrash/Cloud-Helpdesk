@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}Help Desk{% endblock %}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  :root {
+    --bg: #f2f4f7; --panel: #ffffff; --panel-2: #f7f8fa; --text: #161b22; --muted: #5e6875;
+    --line: #d9dee5; --line-2: #c3cad3;
+    --bar: #161c26; --bar-text: #e8ecf1; --bar-muted: #9aa5b3; --bar-line: #2a3340;
+    --accent: #0f766e; --accent-hover: #0b5d56; --bar-rule: #b9c0c8;
+    --red: #b42318; --amber: #9a5b00; --green: #1d6b43; --violet: #5a3fa8;
+    --red-bg: #fbeae8; --amber-bg: #fdf1dc; --green-bg: #e3f2e9; --teal-bg: #dff3f0; --indigo: #4338ca; --indigo-bg: #e8e9fb; --cyan: #0e7490; --cyan-bg: #dff1f5; --gray-bg: #eceff3; --violet-bg: #eeeafa;
+    --radius: 4px;
+    --sans: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+    --mono: "IBM Plex Mono", Consolas, ui-monospace, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161616; --panel: #1f1f1f; --panel-2: #262626; --text: #e8e8e8; --muted: #9e9e9e;
+      --line: #333333; --line-2: #454545;
+      --bar: #0e0e0e; --bar-text: #e8e8e8; --bar-muted: #8f8f8f; --bar-line: #2e2e2e;
+      --accent: #4cc3b2; --accent-hover: #74d4c6; --bar-rule: #d9d9d9;
+      --red: #ff8b80; --amber: #f0b45c; --green: #6fcf9a; --violet: #b8a3ff;
+      --red-bg: #3a1d1a; --amber-bg: #352914; --green-bg: #15301f; --teal-bg: #163230; --indigo: #a9abff; --indigo-bg: #25264a; --cyan: #6fcde3; --cyan-bg: #14313a; --gray-bg: #2c2c2c; --violet-bg: #29213f;
+      color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.5 var(--sans); -webkit-font-smoothing: antialiased; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; padding: 10px 24px;
+           background: var(--bar); color: var(--bar-text); border-bottom: 3px solid var(--bar-rule); }
+  .brand { font-weight: 700; color: #fff; font-size: 16px; letter-spacing: .01em; }
+  .brand:hover { text-decoration: none; }
+  nav { display: flex; gap: 20px; flex: 1; }
+  nav a { color: var(--bar-text); font-size: 14px; font-weight: 500; }
+  header .muted { color: var(--bar-muted); }
+  header select { background: var(--bar); color: var(--bar-text); border-color: var(--bar-line); color-scheme: dark; }
+  main { max-width: 1180px; margin: 24px auto; padding: 0 24px; }
+  h1 { font-weight: 600; letter-spacing: -.005em; }
+  select, input, textarea, button { font: inherit; color: var(--text); }
+  select, input[type=text], textarea { background: var(--panel); border: 1px solid var(--line-2);
+         border-radius: var(--radius); padding: 6px 8px; }
+  textarea { width: 100%; min-height: 80px; resize: vertical; }
+  button { background: var(--accent); color: #fff; border: 1px solid var(--accent); border-radius: var(--radius);
+           padding: 7px 16px; cursor: pointer; font-weight: 600; font-size: 14px; }
+  button:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+  @media (prefers-color-scheme: dark) { button { color: #0c1420; } }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+          padding: 16px; margin-bottom: 16px; }
+  .muted { color: var(--muted); font-size: 13px; }
+  .error { background: var(--red-bg); color: var(--red); border: 1px solid currentColor; border-left-width: 4px;
+           border-radius: var(--radius); padding: 10px 14px; margin-bottom: 16px; font-weight: 500; }
+  .badge { display: inline-block; padding: 2px 7px; border-radius: 3px; font-size: 12px;
+           font-weight: 600; white-space: nowrap; text-transform: capitalize; line-height: 1.5; }
+  .prio-P1 { background: var(--red-bg); color: var(--red); }
+  .prio-P2 { background: var(--amber-bg); color: var(--amber); }
+  .prio-P3 { background: var(--cyan-bg); color: var(--cyan); }
+  .prio-P4 { background: var(--gray-bg); color: var(--muted); }
+  .badge.prio-P1, .badge.prio-P2, .badge.prio-P3, .badge.prio-P4 { font-family: var(--mono); font-weight: 500; }
+  .status-new { background: var(--violet-bg); color: var(--violet); }
+  .status-open { background: var(--teal-bg); color: var(--accent); }
+  .status-in_progress { background: var(--indigo-bg); color: var(--indigo); }
+  .status-pending { background: var(--amber-bg); color: var(--amber); }
+  .status-resolved { background: var(--green-bg); color: var(--green); }
+  .status-closed { background: var(--gray-bg); color: var(--muted); }
+  .sla-on_track, .sla-met { color: var(--green); }
+  .sla-at_risk, .sla-paused { color: var(--amber); }
+  .sla-breached { color: var(--red); font-weight: 600; }
+  .sla-cancelled { color: var(--muted); }
+  table { width: 100%; border-collapse: collapse; background: var(--panel);
+          border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); background: var(--panel-2); }
+  tr:last-child td { border-bottom: 0; }
+  tbody tr:hover td { background: var(--panel-2); }
+  .table-wrap { overflow-x: auto; }
+  @media (max-width: 640px) { main, header { padding-left: 16px; padding-right: 16px; } }
+</style>
+</head>
+<body>
+<header>
+  <a href="/" class="brand">Help Desk</a>
+  <nav>
+    <a href="/">Tickets</a>
+    <a href="/tickets/new">New ticket</a>
+    <a href="/docs">API docs</a>
+  </nav>
+  <form method="post" action="/act-as">
+    <input type="hidden" name="next" value="{{ request.url.path }}">
+    <label class="muted">Acting as
+      <select name="user_id" onchange="this.form.submit()">
+        {% for u in users %}
+        <option value="{{ u.id }}" {% if u.id == current_user.id %}selected{% endif %}>
+          {{ u.name }} ({{ u.role }}{% if u.queue %}, {{ u.queue }}{% endif %})
+        </option>
+        {% endfor %}
+      </select>
+    </label>
+  </form>
+</header>
+<main>
+  {% if error %}<div class="error">{{ error }}</div>{% endif %}
+  {% block content %}{% endblock %}
+</main>
+</body>
+</html>

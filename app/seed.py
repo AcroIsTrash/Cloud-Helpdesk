@@ -1,0 +1,189 @@
+"""Demo users and tickets so the app looks alive on first launch."""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta
+
+from sqlalchemy import Connection, func, insert, select
+
+from . import services as svc
+from .db import tickets, users
+from .models import CommentCreate, Level, Status, TicketCreate
+from .routing import Router
+
+SEED_USERS = [
+    ("Alice Chen", "alice@example.com", "requester", None),
+    ("Bob Martinez", "bob@example.com", "requester", None),
+    ("Dana Reyes", "dana@example.com", "agent", "Service Desk"),
+    ("Sam Patel", "sam@example.com", "agent", "Network Ops"),
+    ("Priya Nair", "priya@example.com", "agent", "Desktop Support"),
+    ("Lee Okafor", "lee@example.com", "agent", "Identity & Access"),
+    ("Jordan Kim", "jordan@example.com", "agent", "Applications"),
+    ("Morgan Blake", "morgan@example.com", "admin", None),
+]
+
+
+# Any fixed number works; it only has to be the same in every app task.
+SEED_LOCK = 20_261_009
+
+
+def seed_on_startup(conn: Connection, router: Router, demo: bool) -> None:
+    """Seed an empty database, safely when several app tasks start at once.
+
+    Seeding is check-then-insert, so tasks booting together would all see an
+    empty table. A Postgres advisory lock lets one task seed while the rest
+    wait, then find the data there and skip. The lock is held per session, so
+    it survives the commits the seed functions make.
+    """
+    conn.execute(select(func.pg_advisory_lock(SEED_LOCK)))
+    try:
+        seed_users(conn)
+        if demo:
+            seed_demo(conn, router)
+    finally:
+        conn.execute(select(func.pg_advisory_unlock(SEED_LOCK)))
+        conn.commit()
+
+
+def seed_users(conn: Connection) -> None:
+    """Create the demo users on an empty database. The schema comes from Alembic."""
+    if conn.scalar(select(func.count()).select_from(users)):
+        return
+    conn.execute(
+        insert(users),
+        [dict(name=n, email=e, role=r, queue=q) for n, e, r, q in SEED_USERS],
+    )
+    conn.commit()
+
+
+def seed_demo(conn: Connection, router: Router) -> None:
+    if conn.scalar(select(func.count()).select_from(tickets)):
+        return
+    u = {r["email"].split("@")[0]: r["id"] for r in svc.list_users(conn)}
+    now = svc.utcnow()
+
+    def ago(**kw: float) -> datetime:
+        return now - timedelta(**kw)
+
+    # 1. Network issue, waiting on the requester (SLA paused)
+    t = svc.create_ticket(
+        conn,
+        TicketCreate(
+            title="VPN drops every 10 minutes",
+            description="Working from home and the VPN disconnects constantly. "
+            "Wifi itself seems fine.",
+            requester_id=u["alice"],
+            impact=Level.MEDIUM,
+            urgency=Level.HIGH,
+        ),
+        router,
+        ago(hours=3),
+    )
+    svc.assign(conn, t, u["sam"], u["sam"], ago(hours=2, minutes=50))
+    svc.transition(conn, t, u["sam"], Status.IN_PROGRESS, now=ago(hours=2, minutes=48))
+    svc.add_comment(
+        conn,
+        t,
+        CommentCreate(
+            author_id=u["sam"],
+            internal=True,
+            body="Seeing similar reports from two other remote users; "
+            "checking the VPN concentrator.",
+        ),
+        ago(hours=2, minutes=46),
+    )
+    svc.add_comment(
+        conn,
+        t,
+        CommentCreate(
+            author_id=u["sam"],
+            body="Thanks Alice. Can you send the client version from Help > About, and whether it "
+            "happens on a wired connection too?",
+        ),
+        ago(hours=2, minutes=45),
+    )
+    svc.transition(
+        conn,
+        t,
+        u["sam"],
+        Status.PENDING,
+        "Waiting on client version from requester",
+        ago(hours=2, minutes=44),
+    )
+
+    # 2. P1 access issue nobody has answered yet: response SLA breached
+    svc.create_ticket(
+        conn,
+        TicketCreate(
+            title="Locked out after password reset",
+            description="Reset my password this morning and now I can't log in anywhere. "
+            "MFA prompt never arrives.",
+            requester_id=u["bob"],
+            impact=Level.HIGH,
+            urgency=Level.HIGH,
+        ),
+        router,
+        ago(minutes=40),
+    )
+
+    # 3. Hardware issue, resolved, awaiting requester confirmation
+    t = svc.create_ticket(
+        conn,
+        TicketCreate(
+            title="Laptop battery won't hold a charge",
+            description="Battery goes from 100% to dead in about 40 minutes, even when idle.",
+            requester_id=u["alice"],
+            impact=Level.LOW,
+            urgency=Level.LOW,
+        ),
+        router,
+        ago(days=2),
+    )
+    svc.assign(conn, t, u["priya"], u["priya"], ago(days=1, hours=23))
+    svc.add_comment(
+        conn,
+        t,
+        CommentCreate(
+            author_id=u["priya"],
+            body="Replacement battery ordered. I'll swap it at your desk tomorrow morning.",
+        ),
+        ago(days=1, hours=22),
+    )
+    svc.transition(conn, t, u["priya"], Status.IN_PROGRESS, now=ago(days=1, hours=2))
+    svc.transition(
+        conn,
+        t,
+        u["priya"],
+        Status.RESOLVED,
+        "Replaced battery; ran diagnostics, health 100%.",
+        ago(days=1),
+    )
+
+    # 4. Software issue, routed but unassigned
+    svc.create_ticket(
+        conn,
+        TicketCreate(
+            title="Excel crashes opening the shared budget workbook",
+            description="Excel crashes every time I open the finance budget workbook "
+            "from the shared drive. Other workbooks open fine.",
+            requester_id=u["bob"],
+            impact=Level.MEDIUM,
+            urgency=Level.MEDIUM,
+        ),
+        router,
+        ago(hours=5),
+    )
+
+    # 5. Doesn't match any rule: lands in triage
+    svc.create_ticket(
+        conn,
+        TicketCreate(
+            title="Where do I request a desk phone?",
+            description="Starting in the new office next week and I'll need a desk phone set up.",
+            requester_id=u["alice"],
+            impact=Level.LOW,
+            urgency=Level.MEDIUM,
+        ),
+        router,
+        ago(minutes=10),
+    )

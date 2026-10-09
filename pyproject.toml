@@ -1,0 +1,66 @@
+[project]
+name = "cloud-helpdesk"
+version = "0.1.0"
+description = "An AI-powered IT service desk on AWS: ticket lifecycle, derived priority, SLA clocks, queues, an audit trail, and AI routing measured against a rule-based baseline."
+readme = "README.md"
+# One Python version everywhere: .python-version, this line, the image and CI.
+requires-python = "==3.13.*"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "jinja2>=3.1",
+    "python-multipart>=0.0.9",
+    "pydantic>=2.6",
+    "sqlalchemy>=2.0",
+    "psycopg[binary]>=3.2",
+    "alembic>=1.13",
+]
+
+[dependency-groups]
+dev = [
+    "httpx2>=2.13",
+    "mypy>=1.10",
+    "pytest>=8",
+    "ruff>=0.5",
+    "testcontainers[postgres]>=4.8",
+]
+
+[tool.uv]
+# This is an application, not a library: uv manages its dependencies
+# but doesn't build or install the project itself.
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+# The vendored agent skills are not this project's code.
+extend-exclude = [".claude"]
+
+[tool.ruff.lint]
+# pyflakes, pycodestyle, isort, pyupgrade, bugbear, simplify.
+select = ["F", "E", "W", "I", "UP", "B", "SIM"]
+ignore = [
+    # `class Status(str, Enum)` -> StrEnum changes how members format in
+    # f-strings, which is a behaviour change, not a lint fix.
+    "UP042",
+]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI declares parameters as `x: str = Form(...)`; that's its API, not a bug.
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Form"]
+
+[tool.mypy]
+python_version = "3.13"
+files = ["app", "tests", "migrations"]
+strict = true
+
+[[tool.mypy.overrides]]
+# Test functions and helpers may skip annotations; their bodies are still checked.
+module = ["tests.*"]
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+disallow_untyped_calls = false

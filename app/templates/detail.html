@@ -1,0 +1,128 @@
+{% extends "base.html" %}
+{% block title %}#{{ ticket.id }} {{ ticket.title }}{% endblock %}
+{% block content %}
+{% set t = ticket %}
+<style>
+  .head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; margin-bottom: 16px; }
+  .head h1 { margin: 0; font-size: 22px; }
+  .head .id { font-family: var(--mono); font-weight: 500; color: var(--muted); }
+  .grid { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 20px; }
+  @media (max-width: 860px) { .grid { grid-template-columns: 1fr; } }
+  .desc { white-space: pre-wrap; margin: 8px 0 0; }
+  .resolution { border-left: 4px solid var(--green); }
+  h2 { font-size: 16px; font-weight: 600; margin: 24px 0 10px; }
+  h3 { font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 0 0 10px; }
+  .timeline { list-style: none; padding: 0; margin: 0 0 16px; }
+  .timeline li { margin-bottom: 10px; }
+  .timeline .event { font-size: 13px; color: var(--muted); padding-left: 14px; border-left: 2px solid var(--line); }
+  .timeline .comment { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px; }
+  .timeline .comment.internal { background: var(--amber-bg); border-color: var(--amber); border-style: dashed; }
+  .timeline .comment p { margin: 6px 0 0; white-space: pre-wrap; }
+  .badge.internal { background: var(--amber); color: var(--panel); }
+  .ago { font-family: var(--mono); font-size: 12px; }
+  dl { display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; margin: 0; font-size: 14px; }
+  dt { color: var(--muted); }
+  dd { margin: 0; }
+  .sla-row { display: flex; justify-content: space-between; font-size: 14px; margin-bottom: 4px; }
+  .bar { height: 6px; background: var(--gray-bg); border-radius: 2px; overflow: hidden; margin-bottom: 12px; }
+  .bar span { display: block; height: 100%; background: currentColor; }
+  aside form > * { margin-bottom: 8px; }
+  aside select { width: 100%; }
+</style>
+
+<div class="head">
+  <h1><span class="id">#{{ t.id }}</span> {{ t.title }}</h1>
+  <span class="badge prio-{{ t.priority }}">{{ t.priority }}</span>
+  <span class="badge status-{{ t.status }}">{{ t.status|label }}</span>
+</div>
+
+<div class="grid">
+<section>
+  <div class="card">
+    <div class="muted">Opened by {{ t.requester_name }} · <span class="ago">{{ t.created_at|ago }}</span></div>
+    <p class="desc">{{ t.description }}</p>
+  </div>
+
+  {% if t.resolution %}
+  <div class="card resolution"><h3>Resolution</h3><div class="desc">{{ t.resolution }}</div></div>
+  {% endif %}
+
+  <h2>Timeline</h2>
+  <ol class="timeline">
+  {% for item in timeline %}
+    {% if item.type == 'comment' %}
+    <li class="comment {% if item.internal %}internal{% endif %}">
+      <div class="muted"><strong>{{ item.author_name }}</strong>
+        {% if item.internal %}<span class="badge internal">internal note</span>{% endif %}
+        · <span class="ago">{{ item.created_at|ago }}</span></div>
+      <p>{{ item.body }}</p>
+    </li>
+    {% else %}
+    <li class="event">{{ item.detail }}{% if item.actor_name %} · {{ item.actor_name }}{% endif %} · <span class="ago">{{ item.created_at|ago }}</span></li>
+    {% endif %}
+  {% endfor %}
+  </ol>
+
+  {% if t.status != 'closed' %}
+  <form class="card" method="post" action="/tickets/{{ t.id }}/comment">
+    <textarea name="body" placeholder="{% if is_agent %}Reply to the requester, or add an internal note…{% else %}Add a reply…{% endif %}" required></textarea>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;gap:8px;flex-wrap:wrap">
+      {% if is_agent %}<label class="muted"><input type="checkbox" name="internal" value="true"> Internal note (hidden from requester)</label>{% else %}<span></span>{% endif %}
+      <button>Post</button>
+    </div>
+  </form>
+  {% endif %}
+</section>
+
+<aside>
+  <div class="card">
+    <dl>
+      <dt>Queue</dt><dd>{{ t.queue }}</dd>
+      <dt>Category</dt><dd>{{ t.category }}</dd>
+      <dt>Assignee</dt><dd>{{ t.assignee_name or 'Unassigned' }}</dd>
+      <dt>Impact</dt><dd>{{ t.impact }}</dd>
+      <dt>Urgency</dt><dd>{{ t.urgency }}</dd>
+      {% if is_agent %}<dt>Routing</dt><dd class="muted">{{ t.routing_reason }}</dd>{% endif %}
+    </dl>
+  </div>
+
+  <div class="card">
+    <h3>SLA</h3>
+    {% for name, clock in [('First response', sla.response), ('Resolution', sla.resolution)] %}
+      <div class="sla-row"><span>{{ name }}</span><span class="sla-{{ clock.state }}">{{ clock.state|label }}</span></div>
+      {% if clock.target_minutes is defined %}
+      <div class="bar sla-{{ clock.state }}"><span style="width: {{ [clock.percent, 100]|min }}%"></span></div>
+      <div class="muted mono" style="margin:-8px 0 12px">{{ clock.elapsed_minutes|duration }} of {{ clock.target_minutes|duration }}
+        {% if clock.paused_minutes %} · paused {{ clock.paused_minutes|duration }}{% endif %}</div>
+      {% endif %}
+    {% endfor %}
+  </div>
+
+  {% if is_agent and t.status != 'closed' %}
+  <form class="card" method="post" action="/tickets/{{ t.id }}/assign">
+    <h3>Assign</h3>
+    <select name="assignee_id">
+      <option value="">Unassigned</option>
+      {% for a in agents %}
+      <option value="{{ a.id }}" {% if a.id == t.assignee_id %}selected{% endif %}>{{ a.name }}{% if a.queue %} ({{ a.queue }}){% endif %}</option>
+      {% endfor %}
+    </select>
+    <button>Save</button>
+  </form>
+  {% endif %}
+
+  {% if next_statuses %}
+  <form class="card" method="post" action="/tickets/{{ t.id }}/transition">
+    <h3>{% if is_agent %}Change status{% else %}Was this fixed?{% endif %}</h3>
+    <select name="to_status">
+      {% for s in next_statuses %}
+      <option value="{{ s }}">{% if not is_agent and s == 'open' %}No, reopen it{% elif not is_agent and s == 'closed' %}Yes, close it{% else %}{{ s|label|capitalize }}{% endif %}</option>
+      {% endfor %}
+    </select>
+    <textarea name="note" placeholder="Note (required to resolve)"></textarea>
+    <button>Update</button>
+  </form>
+  {% endif %}
+</aside>
+</div>
+{% endblock %}

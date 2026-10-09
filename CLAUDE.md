@@ -11,36 +11,23 @@ that bit us gets written up (what broke, how it was fixed).
 
 ## Where this came from
 
-This repo merges two earlier repos (both owned by `AcroIsTrash`):
-
-- **`helpdesk`**: the app. FastAPI + SQLite + Jinja2 IT service desk: ticket
-  state machine, ITIL priority matrix (impact × urgency), two SLA clocks that
-  pause in `pending`, team queues, internal notes, append-only audit trail
-  (`events` table). Rules live in `services.py`; the web layer is thin.
-  `routing.py` has a `Router` protocol with a `KeywordRouter` baseline, and
-  `create_ticket()` falls back to the triage queue (logging a
-  `routing_fallback` event) if a router raises or breaks the contract.
-- **`aws-agent`**: the infra pattern. Terraform VPC + ECR, GitHub Actions with
-  OIDC (no stored AWS keys), images tagged by immutable git SHA, AWS Budgets
-  alarm set before anything is created.
-
-`helpdesk` stays untouched as the clean baseline; its code gets imported into
-`app/` here. In a cloud session, fetch either repo with the `add_repo` tool if
-it isn't already cloned beside this one.
+The app in `app/` was imported from `AcroIsTrash/helpdesk`, which stays
+untouched as the clean baseline. The infra pattern for Phase 2 comes from
+`AcroIsTrash/aws-agent`: Terraform VPC + ECR, GitHub Actions with OIDC (no
+stored AWS keys), images tagged by immutable git SHA, and an AWS Budgets alarm
+set before anything is created. In a cloud session, fetch either repo with the
+`add_repo` tool.
 
 ## Status
 
-- [x] Matt Pocock's skills vendored into `.claude/skills/` (see `SOURCE.md` there)
-- [x] `/setup-matt-pocock-skills` (GitHub Issues on this repo; default triage labels; single-context docs; see `docs/agents/`)
-- [x] Stack grilled and recorded as ADRs (`docs/adr/` 0001–0013, `GLOSSARY.md`)
-- [ ] Phase 1: import app, Postgres + Alembic + auth, docker-compose
-- [ ] Phase 2: Terraform (VPC, ECS Fargate, RDS, ALB) + deploy pipeline
-- [ ] Phase 3: LLM router + eval harness against `KeywordRouter`
-- [ ] Phase 4: suggested replies (pgvector retrieval), summaries, duplicate detection
-- [ ] Phase 5: observability, load test (k6/Locust), SQS worker if the load test justifies it
+Progress lives in one place: the checklist under **Where it is now** in
+`README.md`. Each phase ships on its own, working and documented, before the
+next starts; tick it there when a phase lands. The agent tooling is set up:
+skills vendored in `.claude/skills/` (`SOURCE.md` there), the tracker conventions
+in `docs/agents/`, and the stack recorded as ADRs 0001–0013.
 
-Each phase ships on its own, working and documented, before the next starts.
-Update this list when a phase lands.
+Review reads `CODING_STANDARDS.md`. Cloud sessions run
+`.claude/hooks/session-start.sh`, which provides a local Postgres for the tests.
 
 ## Ground rules
 

@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block content %}
+<style>
+  .counts { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; }
+  .count { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+           padding: 6px 12px; color: var(--text); }
+  .count:hover { border-color: var(--line-2); text-decoration: none; }
+  .count b { margin-left: 6px; font-family: var(--mono); font-weight: 500; }
+  .filters { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 16px; }
+  .title-cell a { font-weight: 600; }
+</style>
+
+<div class="counts">
+  {% for s, n in counts.items() %}
+  <a class="count" href="/?status={{ s }}"><span class="badge status-{{ s }}">{{ s|label }}</span><b>{{ n }}</b></a>
+  {% endfor %}
+</div>
+
+<form class="filters" method="get">
+  <select name="status">
+    <option value="">Active (not closed)</option>
+    <option value="all" {% if f_status == 'all' %}selected{% endif %}>All</option>
+    {% for s in statuses %}
+    <option value="{{ s }}" {% if s == f_status %}selected{% endif %}>{{ s|label|capitalize }}</option>
+    {% endfor %}
+  </select>
+  {% if is_agent %}
+  <select name="queue">
+    <option value="">All queues</option>
+    {% for q in queues %}<option {% if q == f_queue %}selected{% endif %}>{{ q }}</option>{% endfor %}
+  </select>
+  <label><input type="checkbox" name="mine" value="true" {% if mine %}checked{% endif %}> Assigned to me</label>
+  {% endif %}
+  <button>Filter</button>
+</form>
+
+<div class="table-wrap">
+<table>
+  <thead><tr>
+    <th>#</th><th>Ticket</th><th>Priority</th><th>Status</th>
+    {% if is_agent %}<th>Queue</th><th>Assignee</th>{% endif %}
+    <th>SLA</th><th>Opened</th>
+  </tr></thead>
+  <tbody>
+  {% for t in tickets %}
+    {% set r = t.sla.resolution %}
+    <tr>
+      <td class="muted mono">#{{ t.id }}</td>
+      <td class="title-cell"><a href="/tickets/{{ t.id }}">{{ t.title }}</a>
+        <div class="muted">{{ t.category }} · {{ t.requester_name }}</div></td>
+      <td><span class="badge prio-{{ t.priority }}">{{ t.priority }}</span></td>
+      <td><span class="badge status-{{ t.status }}">{{ t.status|label }}</span></td>
+      {% if is_agent %}<td>{{ t.queue }}</td><td>{{ t.assignee_name or '—' }}</td>{% endif %}
+      <td class="sla-{{ r.state }}">{{ r.state|label }}
+        {% if r.remaining_minutes is defined and r.state not in ['met', 'cancelled'] %}
+        <div class="muted mono">{% if r.remaining_minutes >= 0 %}{{ r.remaining_minutes|duration }} left{% else %}{{ (-r.remaining_minutes)|duration }} over{% endif %}</div>
+        {% endif %}
+        {% if t.sla.response.state in ['breached', 'at_risk'] %}
+        <div class="sla-{{ t.sla.response.state }}" style="font-size:13px">response {{ t.sla.response.state|label }}</div>
+        {% endif %}
+      </td>
+      <td class="muted mono">{{ t.created_at|ago }}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="{{ 8 if is_agent else 6 }}" class="muted">No tickets match.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}
