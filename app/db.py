@@ -49,6 +49,8 @@ users = Table(
     Column("email", Text, nullable=False, unique=True),
     Column("role", Text, nullable=False),
     Column("queue", Text),  # the queue an agent works
+    # False = Deactivated: their history stays, but they can no longer act.
+    Column("active", Boolean, nullable=False, server_default="true"),
     CheckConstraint("role IN ('requester', 'agent', 'admin')", name="role"),
 )
 
@@ -88,16 +90,19 @@ comments = Table(
     _timestamp("created_at"),
 )
 
-# Append-only audit trail: every change to a ticket lands here.
+# Append-only audit trail: every change to a ticket or to a person's access
+# lands here. An Event is about a ticket, a person, or both.
 events = Table(
     "events",
     metadata,
     Column("id", Integer, primary_key=True),
-    Column("ticket_id", Integer, ForeignKey("tickets.id"), nullable=False, index=True),
+    Column("ticket_id", Integer, ForeignKey("tickets.id"), index=True),
+    Column("user_id", Integer, ForeignKey("users.id"), index=True),  # whose access changed
     Column("actor_id", Integer, ForeignKey("users.id")),  # NULL = system
     Column("kind", Text, nullable=False),
     Column("detail", Text, nullable=False),
     _timestamp("created_at"),
+    CheckConstraint("ticket_id IS NOT NULL OR user_id IS NOT NULL", name="subject"),
 )
 
 DEFAULT_URL = "postgresql+psycopg://helpdesk:helpdesk@localhost:5432/helpdesk"

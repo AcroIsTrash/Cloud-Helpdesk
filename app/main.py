@@ -31,6 +31,7 @@ from .models import (
     Category,
     CommentCreate,
     CommentRequest,
+    DeactivateRequest,
     Level,
     Status,
     TicketCreate,
@@ -80,15 +81,28 @@ class NotLoggedIn(Exception):
     """No identity source recognised the request, or the person no longer exists."""
 
 
+class Deactivated(Exception):
+    """The person is known, but an Admin has switched off their access."""
+
+
 def current_user(request: Request, conn: Connection = Depends(get_conn)) -> svc.Row:
-    """The person making this request. Every route but /healthz and the login page needs it."""
+    """The person making this request. Every route but /healthz and the login page needs it.
+
+    The identity source says *who* is asking; whether they may still act is
+    the `active` flag in our own database, read here on every request. So a
+    Deactivation takes effect on the very next request, while their session
+    (or, from Phase 2, their token) is still valid.
+    """
     user_id = request.app.state.identity.identify(request)
     if user_id is None:
         raise NotLoggedIn
     try:
-        return svc.get_user(conn, user_id)
+        user = svc.get_user(conn, user_id)
     except svc.NotFound:
         raise NotLoggedIn from None
+    if not user["active"]:
+        raise Deactivated
+    return user
 
 
 @app.exception_handler(NotLoggedIn)
@@ -97,6 +111,14 @@ async def not_logged_in_handler(request: Request, _: NotLoggedIn) -> Response:
         return JSONResponse({"detail": "not logged in"}, status_code=401)
     target = request.url.path + (f"?{request.url.query}" if request.url.query else "")
     return RedirectResponse(f"/login?{urlencode({'next': target})}", status_code=303)
+
+
+@app.exception_handler(Deactivated)
+async def deactivated_handler(request: Request, _: Deactivated) -> Response:
+    message = "Your access to the service desk has been switched off by an Admin."
+    if request.url.path.startswith("/api/"):
+        return JSONResponse({"detail": message}, status_code=403)
+    return render(request, "error.html", None, status_code=403, message=message, switched_off=True)
 
 
 # ---- template filters ------------------------------------------------------
@@ -169,6 +191,25 @@ def api_users(
     _: svc.Row = Depends(current_user), conn: Connection = Depends(get_conn)
 ) -> list[svc.Row]:
     return svc.list_users(conn)
+
+
+@app.post("/api/users/{user_id}/deactivate", tags=["api"], response_model=None)
+def api_deactivate(
+    user_id: int,
+    body: DeactivateRequest,
+    user: svc.Row = Depends(current_user),
+    conn: Connection = Depends(get_conn),
+) -> svc.Row:
+    svc.deactivate(conn, user_id, user["id"], body.reason)
+    return svc.get_user(conn, user_id)
+
+
+@app.post("/api/users/{user_id}/reactivate", tags=["api"], response_model=None)
+def api_reactivate(
+    user_id: int, user: svc.Row = Depends(current_user), conn: Connection = Depends(get_conn)
+) -> svc.Row:
+    svc.reactivate(conn, user_id, user["id"])
+    return svc.get_user(conn, user_id)
 
 
 @app.get("/api/tickets", tags=["api"], response_model=None)
@@ -251,6 +292,7 @@ def render(
     ctx.update(
         current_user=user,
         is_agent=user is not None and svc.is_agent(user),
+        is_admin=user is not None and svc.is_admin(user),
         error=request.query_params.get("error"),
     )
     return templates.TemplateResponse(request, name, ctx, status_code=status_code)
@@ -279,7 +321,7 @@ def login_page(
         request,
         "login.html",
         None,
-        people=svc.list_users(conn) if picker else [],
+        people=svc.list_users(conn, active_only=True) if picker else [],
         picker=picker,
         next=_same_site(next),
     )
@@ -296,9 +338,11 @@ def login(
     if not isinstance(picker, DevLoginPicker):
         raise HTTPException(404)
     try:
-        svc.get_user(conn, user_id)
+        person = svc.get_user(conn, user_id)
     except svc.NotFound as e:
         return back("/login", e)
+    if not person["active"]:
+        return back("/login", f"{person['name']} is deactivated")
     resp = RedirectResponse(_same_site(next), status_code=303)
     picker.log_in(resp, user_id)
     return resp
@@ -408,7 +452,7 @@ def ticket_page(
         user,
         **detail,
         next_statuses=[s.value for s in svc.next_statuses(detail["ticket"], user)],
-        agents=svc.list_users(conn, roles={"agent", "admin"}),
+        agents=svc.list_users(conn, roles=svc.AGENT_ROLES, active_only=True),
     )
 
 
@@ -459,3 +503,42 @@ def assign_form(
     except svc.TicketError as e:
         return back(f"/tickets/{ticket_id}", e)
     return back(f"/tickets/{ticket_id}")
+
+
+# ---- people (Admins) ---------------------------------------------------------
+
+
+@app.get("/people", response_class=HTMLResponse, include_in_schema=False)
+def people_page(
+    request: Request, user: svc.Row = Depends(current_user), conn: Connection = Depends(get_conn)
+) -> HTMLResponse:
+    if not svc.is_admin(user):
+        return render(
+            request, "error.html", user, status_code=403, message="only admins can manage people"
+        )
+    return render(request, "people.html", user, people=svc.list_users(conn))
+
+
+@app.post("/people/{user_id}/deactivate", include_in_schema=False)
+def deactivate_form(
+    user_id: int,
+    reason: str = Form(""),
+    user: svc.Row = Depends(current_user),
+    conn: Connection = Depends(get_conn),
+) -> RedirectResponse:
+    try:
+        svc.deactivate(conn, user_id, user["id"], reason)
+    except svc.TicketError as e:
+        return back("/people", e)
+    return back("/people")
+
+
+@app.post("/people/{user_id}/reactivate", include_in_schema=False)
+def reactivate_form(
+    user_id: int, user: svc.Row = Depends(current_user), conn: Connection = Depends(get_conn)
+) -> RedirectResponse:
+    try:
+        svc.reactivate(conn, user_id, user["id"])
+    except svc.TicketError as e:
+        return back("/people", e)
+    return back("/people")

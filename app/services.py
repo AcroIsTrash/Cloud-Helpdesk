@@ -35,6 +35,8 @@ log = logging.getLogger(__name__)
 Row = dict[str, Any]
 
 AGENT_ROLES = {"agent", "admin"}
+# A Ticket is open, for Deactivation, until it is resolved or closed.
+OPEN_STATUSES = [s.value for s in Status if s not in {Status.RESOLVED, Status.CLOSED}]
 # Requesters may only confirm or reject a fix on their own ticket.
 REQUESTER_TRANSITIONS = {(Status.RESOLVED, Status.OPEN), (Status.RESOLVED, Status.CLOSED)}
 AT_RISK_THRESHOLD = 0.75
@@ -84,6 +86,10 @@ def is_agent(user: Row) -> bool:
     return user["role"] in AGENT_ROLES
 
 
+def is_admin(user: Row) -> bool:
+    return bool(user["role"] == "admin")
+
+
 def get_user(conn: Connection, user_id: int) -> Row:
     row = conn.execute(select(users).where(users.c.id == user_id)).mappings().first()
     if row is None:
@@ -91,8 +97,25 @@ def get_user(conn: Connection, user_id: int) -> Row:
     return dict(row)
 
 
-def list_users(conn: Connection, roles: set[str] | None = None) -> list[Row]:
+def _locked_user(conn: Connection, user_id: int, share: bool = False) -> Row:
+    """Read a person for a command, locking their row until it commits.
+
+    Deactivation takes the row FOR UPDATE; an assignment takes it FOR SHARE, so
+    it waits for a Deactivation in flight and then sees the person deactivated.
+    """
+    query = select(users).where(users.c.id == user_id).with_for_update(read=share)
+    row = conn.execute(query).mappings().first()
+    if row is None:
+        raise NotFound(f"user {user_id} not found")
+    return dict(row)
+
+
+def list_users(
+    conn: Connection, roles: set[str] | None = None, active_only: bool = False
+) -> list[Row]:
     query = select(users).order_by(users.c.role, users.c.name)
+    if active_only:
+        query = query.where(users.c.active)
     rows = [dict(r) for r in conn.execute(query).mappings()]
     return [r for r in rows if roles is None or r["role"] in roles]
 
@@ -121,6 +144,16 @@ def _log(
     conn.execute(
         insert(events).values(
             ticket_id=ticket_id, actor_id=actor_id, kind=kind, detail=detail, created_at=now
+        )
+    )
+
+
+def _log_access(
+    conn: Connection, user_id: int, actor_id: int, kind: str, detail: str, now: datetime
+) -> None:
+    conn.execute(
+        insert(events).values(
+            user_id=user_id, actor_id=actor_id, kind=kind, detail=detail, created_at=now
         )
     )
 
@@ -317,9 +350,11 @@ def assign(
             fields["assignee_id"] = None
             logs.append(("assigned", "Unassigned"))
         else:
-            assignee = get_user(conn, assignee_id)
+            assignee = _locked_user(conn, assignee_id, share=True)
             if not is_agent(assignee):
                 raise TicketError(f"{assignee['name']} is not an agent")
+            if not assignee["active"]:
+                raise TicketError(f"{assignee['name']} is deactivated")
             if t["assignee_id"] == assignee_id:
                 raise TicketError(f"already assigned to {assignee['name']}")
             fields["assignee_id"] = assignee_id
@@ -387,6 +422,67 @@ def add_comment(
         else:
             _update(conn, ticket_id, now)
         return comment_id
+
+
+def deactivate(
+    conn: Connection, user_id: int, actor_id: int, reason: str, now: datetime | None = None
+) -> None:
+    """Switch off a person's access, and hand their open Tickets back to their Queues."""
+    now = now or utcnow()
+    reason = reason.strip()
+    with _atomic(conn):
+        person = _person_for_access_change(conn, user_id, actor_id)
+        if not person["active"]:
+            raise TicketError(f"{person['name']} is already deactivated")
+        if not reason:
+            raise TicketError("a reason is required to deactivate someone")
+
+        conn.execute(update(users).where(users.c.id == user_id).values(active=False))
+        _log_access(conn, user_id, actor_id, "user_deactivated", f"Deactivated: {reason}", now)
+        # The person's row is locked, so no `assign` to them can commit before this
+        # does: no Ticket slips onto their name between this read and the commit.
+        held = conn.execute(
+            select(tickets.c.id)
+            .where(tickets.c.assignee_id == user_id, tickets.c.status.in_(OPEN_STATUSES))
+            .order_by(tickets.c.id)
+            .with_for_update()
+        ).scalars()
+        for ticket_id in list(held):
+            _update(conn, ticket_id, now, assignee_id=None)
+            _log(
+                conn,
+                ticket_id,
+                actor_id,
+                "unassigned",
+                f"Unassigned: {person['name']} was deactivated",
+                now,
+            )
+
+
+def reactivate(conn: Connection, user_id: int, actor_id: int, now: datetime | None = None) -> None:
+    """Switch a person's access back on. Their old Tickets stay where they were sent."""
+    now = now or utcnow()
+    with _atomic(conn):
+        person = _person_for_access_change(conn, user_id, actor_id)
+        if person["active"]:
+            raise TicketError(f"{person['name']} is already active")
+        conn.execute(update(users).where(users.c.id == user_id).values(active=True))
+        _log_access(conn, user_id, actor_id, "user_reactivated", "Reactivated", now)
+
+
+def _person_for_access_change(conn: Connection, user_id: int, actor_id: int) -> Row:
+    """The checks shared by Deactivation and reactivation; locks the person's row."""
+    if not is_admin(get_user(conn, actor_id)):
+        raise PermissionDenied("only admins can deactivate or reactivate people")
+    if user_id == actor_id:
+        raise PermissionDenied("admins cannot deactivate or reactivate themselves")
+    return _locked_user(conn, user_id)
+
+
+def access_events(conn: Connection, user_id: int) -> list[Row]:
+    """The record of a person's access: each Deactivation and reactivation, oldest first."""
+    query = select(events).where(events.c.user_id == user_id).order_by(events.c.id)
+    return [dict(r) for r in conn.execute(query).mappings()]
 
 
 # ---- queries -------------------------------------------------------------

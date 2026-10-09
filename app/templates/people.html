@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}People · Help Desk{% endblock %}
+{% block content %}
+<style>
+  .people form { display: flex; gap: 8px; align-items: center; margin: 0; }
+  .people input[type=text] { min-width: 220px; }
+  .inactive td:not(:last-child) { color: var(--muted); }
+</style>
+<h1>People</h1>
+<p class="muted">Deactivating someone switches off their access on their next request and
+  hands their open tickets back to their queues. Their history stays.</p>
+<div class="table-wrap">
+<table class="people">
+  <thead><tr><th>Name</th><th>Role</th><th>Queue</th><th>Access</th><th></th></tr></thead>
+  <tbody>
+  {% for p in people %}
+  <tr class="{{ '' if p.active else 'inactive' }}">
+    <td>{{ p.name }}<div class="muted">{{ p.email }}</div></td>
+    <td>{{ p.role }}</td>
+    <td>{{ p.queue or '—' }}</td>
+    <td>{% if p.active %}<span class="badge status-open">active</span>{% else %}<span class="badge status-closed">deactivated</span>{% endif %}</td>
+    <td>
+      {% if p.id == current_user.id %}
+      <span class="muted">you</span>
+      {% elif p.active %}
+      <form method="post" action="/people/{{ p.id }}/deactivate">
+        <input type="text" name="reason" placeholder="Reason" aria-label="Reason for deactivating {{ p.name }}" required maxlength="500">
+        <button type="submit">Deactivate</button>
+      </form>
+      {% else %}
+      <form method="post" action="/people/{{ p.id }}/reactivate">
+        <button type="submit">Reactivate</button>
+      </form>
+      {% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}

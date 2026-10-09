@@ -2,5 +2,9 @@
 {% block title %}Not allowed · Help Desk{% endblock %}
 {% block content %}
 <div class="error">{{ message }}</div>
+{% if switched_off %}
+<p><a href="/login">Log in as someone else</a></p>
+{% else %}
 <p><a href="/">Back to tickets</a></p>
+{% endif %}
 {% endblock %}

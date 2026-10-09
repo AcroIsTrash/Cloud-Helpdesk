@@ -127,6 +127,10 @@ class AssignRequest(_Body):
     assignee_id: int | None  # None = unassign
 
 
+class DeactivateRequest(_Body):
+    reason: str = Field(min_length=1, max_length=500)
+
+
 # ---- service inputs: a request plus who is making it ----------------------
 
 

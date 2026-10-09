@@ -168,3 +168,53 @@ def test_healthz_needs_no_login_and_reports_the_database(client):
     finally:
         client.app.state.engine.dispose()
         client.app.state.engine = up
+
+
+def test_a_deactivated_person_is_turned_away_on_their_next_request(client, ids):
+    login(client, ids["sam"])
+    assert client.get("/api/tickets").status_code == 200
+
+    session = client.cookies["session"]
+    login(client, ids["morgan"])
+    r = client.post(f"/api/users/{ids['sam']}/deactivate", json={"reason": "Left the company"})
+    assert r.status_code == 200 and r.json()["active"] is False
+
+    client.cookies.set("session", session)  # Sam's session is still validly signed
+    assert client.get("/api/tickets").status_code == 403
+    assert client.get("/", follow_redirects=False).status_code == 403
+
+
+def test_deactivated_people_are_left_out_of_the_picker_and_assignee_choices(client, ids):
+    login(client, ids["morgan"])
+    client.post(f"/api/users/{ids['sam']}/deactivate", json={"reason": "On leave"})
+
+    assert "Sam Patel" not in client.get("/login").text
+    assert "Sam Patel" not in client.get("/tickets/2").text  # one he never touched
+    r = client.post("/login", data={"user_id": ids["sam"]}, follow_redirects=False)
+    assert r.headers["location"].startswith("/login?error=")
+
+    assert client.post(f"/api/users/{ids['sam']}/reactivate").json()["active"] is True
+    assert "Sam Patel" in client.get("/login").text
+
+
+def test_an_admin_manages_access_from_the_people_page(client, ids):
+    login(client, ids["dana"])
+    assert client.get("/people").status_code == 403
+    assert client.post(f"/api/users/{ids['sam']}/reactivate").status_code == 403
+
+    login(client, ids["morgan"])
+    assert "Sam Patel" in client.get("/people").text
+    r = client.post(
+        f"/people/{ids['sam']}/deactivate",
+        data={"reason": "Contract ended"},
+        follow_redirects=False,
+    )
+    assert (r.status_code, r.headers["location"]) == (303, "/people")
+    sam = next(u for u in client.get("/api/users").json() if u["id"] == ids["sam"])
+    assert sam["active"] is False
+
+    r = client.post(f"/people/{ids['sam']}/deactivate", data={"reason": "again"})
+    assert "already deactivated" in r.text
+    client.post(f"/people/{ids['sam']}/reactivate")
+    sam = next(u for u in client.get("/api/users").json() if u["id"] == ids["sam"])
+    assert sam["active"] is True

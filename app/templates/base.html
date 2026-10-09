@@ -98,6 +98,7 @@
   <nav>
     <a href="/">Tickets</a>
     <a href="/tickets/new">New ticket</a>
+    {% if is_admin %}<a href="/people">People</a>{% endif %}
     <a href="/docs">API docs</a>
   </nav>
   <form method="post" action="/logout" class="who">

@@ -28,16 +28,16 @@ terms are defined in the [glossary](GLOSSARY.md).
 
 The app has been imported from [`helpdesk`](https://github.com/AcroIsTrash/helpdesk)
 with its behaviour unchanged, and now runs on PostgreSQL with Alembic
-migrations. Every request now belongs to a logged-in person, and
-`docker compose up` runs the whole thing locally. Deactivation and the AWS
-deployment come next; the
-[stack](docs/stack.md) lists every piece and why it was chosen.
+migrations. Every request now belongs to a logged-in person, an Admin can
+switch anyone's access off on their very next request, and `docker compose up`
+runs the whole thing locally. Phase 1 is done; the AWS deployment comes next.
+The [stack](docs/stack.md) lists every piece and why it was chosen.
 
 - [x] Import the app on Python 3.13, with CI
 - [x] Postgres + Alembic, tests against a real database
 - [x] A login seam: one `current_user` for pages and API, a dev login picker
 - [x] One command to run it: Dockerfile, docker-compose, seed, `/healthz`
-- [ ] Phase 1 (rest): Deactivation
+- [x] Phase 1 (rest): Deactivation
 - [ ] Phase 2: Terraform (VPC, ECS Fargate, RDS, ALB) and a deploy pipeline
 - [ ] Phase 3: an LLM router, evaluated against the keyword baseline
 - [ ] Phase 4: suggested replies, summaries, duplicate detection
@@ -245,6 +245,61 @@ checks each one), so a client we don't control fails loudly and its owner
 finds out. The schema says so too: `additionalProperties: false` in the
 OpenAPI snapshot.
 
+## Deactivation: switching access off now
+
+An Admin can Deactivate anyone but themselves, from the **People** page or
+`POST /api/users/{id}/deactivate`, and must give a reason. In one transaction:
+
+- the person's `active` flag goes off;
+- a `user_deactivated` Event records who did it and why. Events can now be
+  about a person's access as well as a Ticket (a nullable `ticket_id`, a new
+  `user_id`, and a check that every Event names at least one of them);
+- every open Ticket assigned to them (anything not resolved or closed) is
+  unassigned, with an `unassigned` Event, and stays in its Queue so its team
+  sees it straight away.
+
+Reactivation (`/reactivate`) records `user_reactivated`. Deactivated people
+drop out of the login picker and the assignee choices, and assigning a Ticket
+to one is refused. Their history stays: their Tickets, Comments and Events
+still name them. The rules and their tests are in `app/services.py` and
+`tests/test_services.py`.
+
+**Why revocation is immediate without asking the identity provider.** A login
+session (and from Phase 2, a Cognito token) says *who* someone is, and stays
+valid until it expires. Asking Cognito on every request whether that person
+may still act would add a network call to every page and make Cognito a
+dependency of every click. We don't need to: `current_user` already loads the
+person from our own database on every request, so it checks their `active`
+flag on the same read and turns them away with a 403. The session is still
+validly signed; the database says no
+(`tests/test_api.py::test_a_deactivated_person_is_turned_away_on_their_next_request`).
+
+**What Phase 2 adds.** Cognito *global sign-out* for the Deactivated person, so
+their refresh tokens die too and they can't mint new access tokens. The
+`active` check stays: an access token already issued stays valid until it
+expires (an hour by default), and that hour is exactly what the check closes.
+
+**Two tasks, one person.** The app runs as several tasks, so an Agent could be
+assigned a Ticket in one task while an Admin Deactivates them in another.
+Deactivation locks the person's row `FOR UPDATE`; assignment reads the assignee
+`FOR SHARE`. Whichever commits first, the other waits and then sees its result,
+so no Ticket is left assigned to a Deactivated person
+(`tests/test_services.py::test_assignment_waits_for_a_deactivation_in_flight`).
+A trap found while proving it: without `FOR SHARE` the assignment *still*
+waits, because the foreign key from `tickets.assignee_id` to `users` locks the
+person's row when the Ticket is written. But it waits after the "is this
+person active?" check, so once Deactivation commits it goes ahead and assigns
+the Ticket anyway. The lock has to come before the check, not just somewhere
+in the transaction.
+
+**Friction: Alembic doesn't see check constraints.** `alembic revision
+--autogenerate` picked up the new columns and the foreign key, but not the
+"at least one of `ticket_id`/`user_id`" check, and the CI drift check can't
+catch it either: autogenerate doesn't compare check constraints. It was added
+to the migration by hand, and `tests/test_schema.py` upgrades a database
+holding data from the previous revision and proves the check refuses an Event
+about nothing.
+
 ## Project layout
 
 ```
@@ -364,6 +419,6 @@ pass against Postgres with their assertions unchanged.
 ## Known simplifications (for now)
 
 - Login is a dev-only picker until Cognito arrives in phase 2; its sessions
-  last until the browser closes and are not tied to the person's `active` flag
-  yet (Deactivation is the next ticket).
+  last until the browser closes (a Deactivated person's session stays signed,
+  but every request from it gets a 403).
 - SLAs use calendar time, not business hours.

@@ -1,8 +1,12 @@
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import select, update
 
 from app import services as svc
+from app.db import users
 from app.models import (
     Category,
     CommentCreate,
@@ -317,3 +321,107 @@ def test_rejected_command_leaves_ticket_free_for_others(conn, engine, ids):
         other.exec_driver_sql("SET lock_timeout = '1s'")
         svc.transition(other, tid, ids["dana"], Status.OPEN, now=at(2))
     assert svc.ticket_detail(conn, tid)["ticket"]["status"] == "open"
+
+
+# ---- Deactivation ----------------------------------------------------------------
+
+
+def test_deactivation_unassigns_open_tickets_and_records_why(conn, ids):
+    open_ticket = make(conn, ids)
+    svc.assign(conn, open_ticket, ids["dana"], ids["sam"], at(1))
+    done = make(conn, ids)
+    svc.assign(conn, done, ids["dana"], ids["sam"], at(1))
+    svc.transition(conn, done, ids["sam"], Status.RESOLVED, "Fixed the tunnel", at(2))
+
+    svc.deactivate(conn, ids["sam"], ids["morgan"], "Left the company", at(3))
+
+    assert svc.get_user(conn, ids["sam"])["active"] is False
+    still_open = svc.ticket_detail(conn, open_ticket)
+    assert still_open["ticket"]["assignee_id"] is None
+    assert still_open["ticket"]["queue"] == "Network Ops"  # stays in its Queue
+    assert still_open["events"][-1]["kind"] == "unassigned"
+    assert svc.ticket_detail(conn, done)["ticket"]["assignee_id"] == ids["sam"]
+    [event] = svc.access_events(conn, ids["sam"])
+    assert (event["kind"], event["actor_id"]) == ("user_deactivated", ids["morgan"])
+    assert "Left the company" in event["detail"]
+
+
+@pytest.mark.parametrize(
+    "actor,target,error",
+    [
+        ("dana", "sam", svc.PermissionDenied),  # an Agent is not an Admin
+        ("alice", "sam", svc.PermissionDenied),  # nor is a Requester
+        ("morgan", "morgan", svc.PermissionDenied),  # never themselves
+    ],
+)
+def test_only_an_admin_deactivates_and_never_themselves(conn, ids, actor, target, error):
+    with pytest.raises(error):
+        svc.deactivate(conn, ids[target], ids[actor], "No longer here", at(1))
+    assert svc.get_user(conn, ids[target])["active"] is True
+    assert svc.access_events(conn, ids[target]) == []
+
+
+def test_deactivation_needs_a_reason(conn, ids):
+    with pytest.raises(svc.TicketError, match="reason"):
+        svc.deactivate(conn, ids["sam"], ids["morgan"], "   ", at(1))
+    assert svc.get_user(conn, ids["sam"])["active"] is True
+
+
+def test_assigning_to_a_deactivated_person_is_refused(conn, ids):
+    tid = make(conn, ids)
+    svc.deactivate(conn, ids["sam"], ids["morgan"], "On leave", at(1))
+    with pytest.raises(svc.TicketError, match="deactivated"):
+        svc.assign(conn, tid, ids["dana"], ids["sam"], at(2))
+    assert svc.ticket_detail(conn, tid)["ticket"]["assignee_id"] is None
+
+
+def test_reactivation_is_recorded_and_restores_assignment(conn, ids):
+    tid = make(conn, ids)
+    svc.deactivate(conn, ids["sam"], ids["morgan"], "On leave", at(1))
+    with pytest.raises(svc.PermissionDenied):
+        svc.reactivate(conn, ids["sam"], ids["dana"], at(2))
+
+    svc.reactivate(conn, ids["sam"], ids["morgan"], at(3))
+
+    assert svc.get_user(conn, ids["sam"])["active"] is True
+    assert [e["kind"] for e in svc.access_events(conn, ids["sam"])] == [
+        "user_deactivated",
+        "user_reactivated",
+    ]
+    svc.assign(conn, tid, ids["dana"], ids["sam"], at(4))
+    assert svc.ticket_detail(conn, tid)["ticket"]["assignee_id"] == ids["sam"]
+
+
+def test_assignment_waits_for_a_deactivation_in_flight(conn, engine, ids):
+    """Another task is mid-Deactivation of Sam when an Agent assigns to him.
+
+    The assignment must wait for it, then see Sam deactivated and refuse;
+    otherwise the Ticket lands on Sam after Deactivation swept his Tickets.
+    """
+    tid = make(conn, ids)
+    with engine.connect() as deactivating:
+        deactivating.execute(select(users).where(users.c.id == ids["sam"]).with_for_update())
+        deactivating.execute(update(users).where(users.c.id == ids["sam"]).values(active=False))
+
+        with ThreadPoolExecutor(1) as pool:
+            assigning = pool.submit(svc.assign, conn, tid, ids["dana"], ids["sam"], at(1))
+            _wait_until_blocked(engine)
+            deactivating.commit()
+            with pytest.raises(svc.TicketError, match="deactivated"):
+                assigning.result(timeout=10)
+    assert svc.ticket_detail(conn, tid)["ticket"]["assignee_id"] is None
+
+
+def _wait_until_blocked(engine, timeout=5.0):
+    """Wait until some session is waiting on a row lock."""
+    deadline = time.monotonic() + timeout
+    with engine.connect() as probe:
+        while time.monotonic() < deadline:
+            waiting = probe.exec_driver_sql(
+                "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock'"
+            ).scalar_one()
+            probe.rollback()
+            if waiting:
+                return
+            time.sleep(0.02)
+    raise AssertionError("nothing ever waited on the lock")
