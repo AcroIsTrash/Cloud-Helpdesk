@@ -159,11 +159,14 @@ engineer knows from RADIUS and TACACS+:
   picker: choose a person from a list and get a session cookie, signed with
   HMAC so the browser can't edit it into another id. The JSON API reads the
   same cookie for now.
-- **Authorization: what may you do?** Unchanged, and still in the service
+- **Authorization: what may you do?** The permission rules in the service
   layer (`app/services.py`): a Requester sees and comments on only their own
   Tickets (anything else is a 403, even a guessed Ticket number), and only
   Agents assign, triage or write Internal notes. The web layer passes the
-  logged-in person in; it decides nothing itself.
+  logged-in person in and decides nothing itself. That closed two holes in the
+  API, which used to call the services without a viewer: any caller could read
+  any Ticket, Internal notes included, and list every Ticket
+  (`tests/test_api.py::test_requester_cannot_open_someone_elses_ticket`).
 - **Accounting: what did you do?** Every change writes an Event naming the
   person, in the same transaction as the change. Because that person now comes
   from the session, the audit trail can be trusted.

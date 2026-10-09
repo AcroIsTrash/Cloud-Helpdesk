@@ -296,6 +296,17 @@ def test_ticket_list_puts_p1_first(conn, ids):
     assert [t["id"] for t in svc.list_tickets(conn)] == [p1, p2, p4]
 
 
+def test_requesters_list_and_count_only_their_own_tickets(conn, ids):
+    alices = make(conn, ids)
+    bobs = make(conn, ids, requester_id=ids["bob"])
+    alice, dana = svc.get_user(conn, ids["alice"]), svc.get_user(conn, ids["dana"])
+
+    assert [t["id"] for t in svc.list_tickets(conn, viewer=alice)] == [alices]
+    assert svc.status_counts(conn, viewer=alice)["new"] == 1
+    assert {t["id"] for t in svc.list_tickets(conn, viewer=dana)} == {alices, bobs}
+    assert svc.status_counts(conn, viewer=dana)["new"] == 2
+
+
 def test_rejected_command_leaves_ticket_free_for_others(conn, engine, ids):
     """A failed check rolls back at once, so it can't hold the ticket's lock."""
     tid = make(conn, ids)

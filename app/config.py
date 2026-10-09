@@ -6,7 +6,9 @@ import os
 import secrets
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Literal, cast
 
+Environment = Literal["local", "aws"]
 ENVIRONMENTS = {"local", "aws"}
 
 
@@ -16,7 +18,7 @@ class ConfigError(RuntimeError):
 
 @dataclass(frozen=True)
 class Settings:
-    environment: str  # "local" or "aws"
+    environment: Environment
     dev_login: bool  # the dev login picker: anyone can log in as anyone
     session_secret: str  # signs the picker's session cookie
     demo: bool  # load demo tickets on an empty database
@@ -32,7 +34,7 @@ class Settings:
         if dev_login and environment == "aws":
             raise ConfigError("the dev login picker cannot be enabled with HELPDESK_ENV=aws")
         return cls(
-            environment=environment,
+            environment=cast(Environment, environment),
             dev_login=dev_login,
             # Without a fixed secret, sessions last until the app restarts.
             session_secret=env.get("HELPDESK_SESSION_SECRET") or secrets.token_urlsafe(32),

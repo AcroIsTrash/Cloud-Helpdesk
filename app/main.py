@@ -169,7 +169,7 @@ def api_list(
         include_closed=include_closed,
         queue=queue,
         assignee_id=assignee_id,
-        requester_id=None if svc.is_agent(user) else user["id"],
+        viewer=user,
     )
     return [r | {"sla": svc.sla_status(r)} for r in rows]
 
@@ -312,7 +312,7 @@ def index(
         include_closed=(status == "all"),
         queue=queue or None,
         assignee_id=user["id"] if (mine and agent) else None,
-        requester_id=None if agent else user["id"],
+        viewer=user,
     )
     for r in rows:
         r["sla"] = svc.sla_status(r)
@@ -321,7 +321,7 @@ def index(
         "list.html",
         user,
         tickets=rows,
-        counts=svc.status_counts(conn, None if agent else user["id"]),
+        counts=svc.status_counts(conn, viewer=user),
         statuses=[s.value for s in Status],
         queues=ALL_QUEUES,
         f_status=status,
