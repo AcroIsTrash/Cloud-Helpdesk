@@ -102,9 +102,10 @@ jobs:
       - name: The app serves seeded demo data after login
         run: |
           curl -fsS http://localhost:8000/healthz
-          curl -fsS -c cookies -o /dev/null -d user_id=1 http://localhost:8000/login
+          # user 3 is Dana, an Agent, who sees all 5 demo tickets
+          curl -fsS -c cookies -o /dev/null -d user_id=3 http://localhost:8000/login
           curl -fsS -b cookies http://localhost:8000/api/tickets \
-            | python3 -c 'import json, sys; n = len(json.load(sys.stdin)); print(n, "tickets"); assert n > 0'
+            | python3 -c 'import json, sys; n = len(json.load(sys.stdin)); print(n, "tickets"); assert n == 5'
       - name: Logs on failure
         if: failure()
         run: docker compose logs

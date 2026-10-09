@@ -112,6 +112,8 @@ def make_engine(url: str | None = None) -> Engine:
     # server's default is; the SLA arithmetic and the API output rely on it.
     return create_engine(
         url or database_url(),
-        connect_args={"options": "-c timezone=UTC"},
+        # A short connect timeout: /healthz must answer the load balancer
+        # before its own timeout, even when the database host drops packets.
+        connect_args={"options": "-c timezone=UTC", "connect_timeout": 5},
         pool_pre_ping=True,
     )

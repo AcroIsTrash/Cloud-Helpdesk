@@ -34,6 +34,7 @@ services:
         condition: service_healthy
 
   app:
+    build: .  # the same image as migrate; listed so compose builds it, never pulls it
     image: cloud-helpdesk:local
     environment:
       DATABASE_URL: *database-url

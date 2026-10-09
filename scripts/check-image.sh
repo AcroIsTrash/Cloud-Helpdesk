@@ -26,7 +26,12 @@ fi
 echo "== installed packages"
 packages=$(run python -c 'import importlib.metadata as m; print("\n".join(sorted(d.metadata["Name"].lower() for d in m.distributions())))')
 echo "$packages" | paste -sd' '
-for dev in pytest ruff mypy testcontainers httpx2; do
+# The dev group, read from pyproject.toml so the two lists can't drift.
+dev_packages=$(python3 -c 'import re, tomllib
+import sys
+for req in tomllib.load(open(sys.argv[1], "rb"))["dependency-groups"]["dev"]:
+    print(re.split(r"[\[<>=~! ]", req)[0].lower())' "$(dirname "$0")/../pyproject.toml")
+for dev in $dev_packages; do
   if echo "$packages" | grep -qx "$dev"; then
     echo "FAIL: dev dependency $dev is installed"; fail=1
   fi
