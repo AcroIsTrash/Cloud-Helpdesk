@@ -29,7 +29,11 @@ Prefer this to `issue_read get_sub_issues`, which returns every ticket's full bo
 
 ## Landing a ticket
 
-`main` is protected: work reaches it only through a PR with green CI. When `/implement` finishes a ticket, push the branch and open a PR whose body says `Closes #<ticket>`. A ticket blocked by an unmerged one branches from its blocker's branch, and its PR targets that branch until the blocker merges.
+`main` is protected: work reaches it only through a PR with green CI. When `/implement` finishes a ticket, push the branch and open a PR whose body says `Closes #<ticket>`.
+
+**Review findings.** Every finding from `/code-review` ends in one of three states, listed under a **Review** heading in the PR body: **fixed** (the commit), **filed** (a new issue, `needs-triage`, linked) or **declined** (one line of why). A finding that is in none of the three is lost work.
+
+**Stacked PRs.** A ticket blocked by an unmerged one branches from its blocker's branch, and its PR targets that branch so the diff shows only the new ticket. A stacked PR merges only once its base is `main`: the repo deletes a branch when its PR merges, and GitHub then retargets the PRs stacked on it to `main`. A stacked PR still showing another base is not ready to merge, whatever its CI says (#11 merged into `claude/login-seam` that way, and #5 missed `main`).
 
 ## Pull requests as a triage surface
 
