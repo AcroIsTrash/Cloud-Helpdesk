@@ -118,6 +118,17 @@ pull request: `lint`, `typecheck`, `test`, and `migrations`, which upgrades an
 empty database to head and then fails if autogenerate still finds a difference
 from the declared tables (a table changed without a migration).
 
+The API contract is pinned too: `tests/openapi.json` is a snapshot of the
+OpenAPI schema, and the suite fails if the schema drifts from it. This caught
+a real slip during the import, where adding type hints quietly changed the
+schema (FastAPI turns a return annotation into a response model). When an API
+change is intended, regenerate the snapshot and commit it with the change, so
+the PR diff shows exactly what changed:
+
+```bash
+UPDATE_SNAPSHOTS=1 uv run pytest tests/test_openapi.py
+```
+
 After changing a table in `app/db.py`, generate the migration and read it
 before committing:
 
