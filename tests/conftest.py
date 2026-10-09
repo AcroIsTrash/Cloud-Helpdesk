@@ -18,7 +18,8 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy import Connection, Engine, text
 
-from app.db import make_engine, metadata, seed_users
+from app.db import make_engine, metadata
+from app.seed import seed_users
 
 POSTGRES_IMAGE = "pgvector/pgvector:pg16"
 

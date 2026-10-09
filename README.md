@@ -132,8 +132,8 @@ app/
   models.py     policy: statuses, transitions, priority matrix, SLA targets, schemas
   services.py   business rules; knows nothing about HTTP
   routing.py    Router interface + KeywordRouter baseline
-  db.py         table declarations (SQLAlchemy Core), engine, seed users
-  seed.py       demo tickets
+  db.py         table declarations (SQLAlchemy Core) and the engine
+  seed.py       demo users and tickets
   main.py       FastAPI: JSON API under /api, HTML pages elsewhere
   templates/    Jinja2 pages
 migrations/     Alembic migrations, generated from app/db.py
@@ -185,9 +185,15 @@ pass against Postgres with their assertions unchanged.
 - **`with conn:` doesn't translate.** In `sqlite3` that block commits or rolls
   back. SQLAlchemy starts a transaction on the *first* statement, which is
   usually a read (does this user exist?), so `conn.begin()` afterwards
-  raises. Each command now ends in a small `_atomic(conn)` block that commits
-  the whole unit, its reads included, or rolls it all back. An Event still
-  never commits without the change it records.
+  raises. Each command now runs inside a small `_atomic(conn)` block that
+  commits the whole unit, its checks included, or rolls it all back. An Event
+  still never commits without the change it records.
+- **Two tasks, one ticket.** SQLite had one writer at a time; Postgres serves
+  several app tasks at once, and under its default isolation two of them could
+  read the same `pending` ticket and both bank its paused time. Commands now
+  read the ticket `FOR UPDATE`, so the second waits for the first to commit
+  and then sees the new state. A failed check rolls back at once, so it never
+  sits on the lock (a test holds it to that).
 - **Foreign keys were off.** SQLite ignores foreign keys unless every
   connection runs `PRAGMA foreign_keys = ON`. Postgres always enforces them, so
   the PRAGMA is gone.

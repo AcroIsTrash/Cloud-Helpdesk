@@ -1,15 +1,37 @@
-"""Demo data so the app looks alive on first launch."""
+"""Demo users and tickets so the app looks alive on first launch."""
 
 from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from sqlalchemy import Connection, func, select
+from sqlalchemy import Connection, func, insert, select
 
 from . import services as svc
-from .db import tickets
+from .db import tickets, users
 from .models import CommentCreate, Level, Status, TicketCreate
 from .routing import Router
+
+SEED_USERS = [
+    ("Alice Chen", "alice@example.com", "requester", None),
+    ("Bob Martinez", "bob@example.com", "requester", None),
+    ("Dana Reyes", "dana@example.com", "agent", "Service Desk"),
+    ("Sam Patel", "sam@example.com", "agent", "Network Ops"),
+    ("Priya Nair", "priya@example.com", "agent", "Desktop Support"),
+    ("Lee Okafor", "lee@example.com", "agent", "Identity & Access"),
+    ("Jordan Kim", "jordan@example.com", "agent", "Applications"),
+    ("Morgan Blake", "morgan@example.com", "admin", None),
+]
+
+
+def seed_users(conn: Connection) -> None:
+    """Create the demo users on an empty database. The schema comes from Alembic."""
+    if conn.scalar(select(func.count()).select_from(users)):
+        return
+    conn.execute(
+        insert(users),
+        [dict(name=n, email=e, role=r, queue=q) for n, e, r, q in SEED_USERS],
+    )
+    conn.commit()
 
 
 def seed_demo(conn: Connection, router: Router) -> None:

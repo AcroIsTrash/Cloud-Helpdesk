@@ -20,7 +20,7 @@ from pydantic import ValidationError
 from sqlalchemy import Connection, inspect
 
 from . import services as svc
-from .db import make_engine, seed_users
+from .db import make_engine
 from .models import (
     ALL_QUEUES,
     PRIORITY_MATRIX,
@@ -33,7 +33,7 @@ from .models import (
     TransitionRequest,
 )
 from .routing import KeywordRouter
-from .seed import seed_demo
+from .seed import seed_demo, seed_users
 
 # Swap this for an AI router later; nothing else needs to change.
 ROUTER = KeywordRouter()

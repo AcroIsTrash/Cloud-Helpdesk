@@ -14,7 +14,6 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     Column,
-    Connection,
     DateTime,
     Engine,
     ForeignKey,
@@ -23,9 +22,6 @@ from sqlalchemy import (
     Table,
     Text,
     create_engine,
-    func,
-    insert,
-    select,
 )
 
 # Name constraints predictably so migrations can refer to them.
@@ -104,17 +100,6 @@ events = Table(
     _timestamp("created_at"),
 )
 
-SEED_USERS = [
-    ("Alice Chen", "alice@example.com", "requester", None),
-    ("Bob Martinez", "bob@example.com", "requester", None),
-    ("Dana Reyes", "dana@example.com", "agent", "Service Desk"),
-    ("Sam Patel", "sam@example.com", "agent", "Network Ops"),
-    ("Priya Nair", "priya@example.com", "agent", "Desktop Support"),
-    ("Lee Okafor", "lee@example.com", "agent", "Identity & Access"),
-    ("Jordan Kim", "jordan@example.com", "agent", "Applications"),
-    ("Morgan Blake", "morgan@example.com", "admin", None),
-]
-
 DEFAULT_URL = "postgresql+psycopg://helpdesk:helpdesk@localhost:5432/helpdesk"
 
 
@@ -130,14 +115,3 @@ def make_engine(url: str | None = None) -> Engine:
         connect_args={"options": "-c timezone=UTC"},
         pool_pre_ping=True,
     )
-
-
-def seed_users(conn: Connection) -> None:
-    """Create the demo users on an empty database. Schema comes from Alembic."""
-    if conn.scalar(select(func.count()).select_from(users)):
-        return
-    conn.execute(
-        insert(users),
-        [dict(name=n, email=e, role=r, queue=q) for n, e, r, q in SEED_USERS],
-    )
-    conn.commit()

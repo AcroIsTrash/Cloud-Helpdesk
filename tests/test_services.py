@@ -294,3 +294,15 @@ def test_ticket_list_puts_p1_first(conn, ids):
     p1 = make(conn, ids, impact=Level.HIGH, urgency=Level.HIGH)
     p2 = make(conn, ids, impact=Level.HIGH, urgency=Level.MEDIUM)
     assert [t["id"] for t in svc.list_tickets(conn)] == [p1, p2, p4]
+
+
+def test_rejected_command_leaves_ticket_free_for_others(conn, engine, ids):
+    """A failed check rolls back at once, so it can't hold the ticket's lock."""
+    tid = make(conn, ids)
+    with pytest.raises(svc.PermissionDenied):
+        svc.transition(conn, tid, ids["bob"], Status.OPEN, now=at(1))
+
+    with engine.connect() as other:
+        other.exec_driver_sql("SET lock_timeout = '1s'")
+        svc.transition(other, tid, ids["dana"], Status.OPEN, now=at(2))
+    assert svc.ticket_detail(conn, tid)["ticket"]["status"] == "open"

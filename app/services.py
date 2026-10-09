@@ -66,11 +66,11 @@ def _iso(dt: datetime) -> str:
 
 @contextmanager
 def _atomic(conn: Connection) -> Iterator[None]:
-    """Commit everything since the transaction began (its reads included), or nothing.
+    """Run a command as one transaction: commit it all, or roll it all back.
 
-    SQLAlchemy begins a transaction on the first statement, so the checks a
-    command makes and the writes that follow share one transaction, and an
-    Event never commits without the change it records.
+    A command's checks and writes share the transaction, so an Event never
+    commits without the change it records, and a failed check releases the
+    ticket's row lock straight away.
     """
     try:
         yield
@@ -98,7 +98,13 @@ def list_users(conn: Connection, roles: set[str] | None = None) -> list[Row]:
 
 
 def _ticket(conn: Connection, ticket_id: int) -> Row:
-    row = conn.execute(select(tickets).where(tickets.c.id == ticket_id)).mappings().first()
+    """Read a ticket for a command, locking its row until the command commits.
+
+    Without the lock, two app tasks changing the same ticket at once could both
+    act on the same old state (bank the same paused time twice, say).
+    """
+    query = select(tickets).where(tickets.c.id == ticket_id).with_for_update()
+    row = conn.execute(query).mappings().first()
     if row is None:
         raise NotFound(f"ticket {ticket_id} not found")
     return dict(row)
@@ -169,7 +175,6 @@ def create_ticket(
     conn: Connection, data: TicketCreate, router: Router, now: datetime | None = None
 ) -> int:
     now = now or utcnow()
-    get_user(conn, data.requester_id)
     priority = compute_priority(data.impact, data.urgency)
 
     fell_back = False
@@ -181,6 +186,7 @@ def create_ticket(
         decision, fell_back = _safe_route(router, data.title, data.description)
 
     with _atomic(conn):
+        get_user(conn, data.requester_id)
         tid: int = conn.execute(
             insert(tickets)
             .values(
@@ -230,41 +236,43 @@ def transition(
     now: datetime | None = None,
 ) -> None:
     now = now or utcnow()
-    t = _ticket(conn, ticket_id)
-    actor = get_user(conn, actor_id)
-    current = Status(t["status"])
-    note = (note or "").strip() or None
-
-    if to_status == current:
-        raise TicketError(f"ticket is already {current.value}")
-    if to_status not in ALLOWED_TRANSITIONS[current]:
-        raise TicketError(f"cannot move a ticket from {current.value} to {to_status.value}")
-    if not is_agent(actor) and (
-        t["requester_id"] != actor_id or (current, to_status) not in REQUESTER_TRANSITIONS
-    ):
-        raise PermissionDenied("requesters can only reopen or close their own resolved tickets")
-    if to_status == Status.RESOLVED and not note:
-        raise TicketError("a resolution note is required to resolve a ticket")
-    if current == Status.NEW and to_status == Status.CLOSED and not note:
-        raise TicketError("a reason is required to close an untriaged ticket")
-
-    fields: dict[str, Any] = {"status": to_status.value}
-    if current == Status.PENDING:
-        fields.update(_unpause(t, now))
-    if to_status == Status.PENDING:
-        fields["paused_since"] = now
-    if to_status == Status.RESOLVED:
-        fields.update(resolved_at=now, resolution=note)
-    if current == Status.RESOLVED and to_status == Status.OPEN:
-        fields.update(resolved_at=None, resolution=None)  # reopen: clock keeps running
-    if to_status == Status.CLOSED:
-        fields["closed_at"] = now
-
-    auto_assign = to_status == Status.IN_PROGRESS and t["assignee_id"] is None and is_agent(actor)
-    if auto_assign:
-        fields["assignee_id"] = actor_id
-
     with _atomic(conn):
+        t = _ticket(conn, ticket_id)
+        actor = get_user(conn, actor_id)
+        current = Status(t["status"])
+        note = (note or "").strip() or None
+
+        if to_status == current:
+            raise TicketError(f"ticket is already {current.value}")
+        if to_status not in ALLOWED_TRANSITIONS[current]:
+            raise TicketError(f"cannot move a ticket from {current.value} to {to_status.value}")
+        if not is_agent(actor) and (
+            t["requester_id"] != actor_id or (current, to_status) not in REQUESTER_TRANSITIONS
+        ):
+            raise PermissionDenied("requesters can only reopen or close their own resolved tickets")
+        if to_status == Status.RESOLVED and not note:
+            raise TicketError("a resolution note is required to resolve a ticket")
+        if current == Status.NEW and to_status == Status.CLOSED and not note:
+            raise TicketError("a reason is required to close an untriaged ticket")
+
+        fields: dict[str, Any] = {"status": to_status.value}
+        if current == Status.PENDING:
+            fields.update(_unpause(t, now))
+        if to_status == Status.PENDING:
+            fields["paused_since"] = now
+        if to_status == Status.RESOLVED:
+            fields.update(resolved_at=now, resolution=note)
+        if current == Status.RESOLVED and to_status == Status.OPEN:
+            fields.update(resolved_at=None, resolution=None)  # reopen: clock keeps running
+        if to_status == Status.CLOSED:
+            fields["closed_at"] = now
+
+        auto_assign = (
+            to_status == Status.IN_PROGRESS and t["assignee_id"] is None and is_agent(actor)
+        )
+        if auto_assign:
+            fields["assignee_id"] = actor_id
+
         _update(conn, ticket_id, now, **fields)
         _log(
             conn,
@@ -293,36 +301,36 @@ def assign(
     now: datetime | None = None,
 ) -> None:
     now = now or utcnow()
-    t = _ticket(conn, ticket_id)
-    actor = get_user(conn, actor_id)
-    if not is_agent(actor):
-        raise PermissionDenied("only agents can assign tickets")
-    if t["status"] == Status.CLOSED.value:
-        raise TicketError("closed tickets cannot be reassigned")
-
-    fields: dict[str, Any] = {}
-    logs: list[tuple[str, str]] = []
-    if assignee_id is None:
-        if t["assignee_id"] is None:
-            raise TicketError("ticket is already unassigned")
-        fields["assignee_id"] = None
-        logs.append(("assigned", "Unassigned"))
-    else:
-        assignee = get_user(conn, assignee_id)
-        if not is_agent(assignee):
-            raise TicketError(f"{assignee['name']} is not an agent")
-        if t["assignee_id"] == assignee_id:
-            raise TicketError(f"already assigned to {assignee['name']}")
-        fields["assignee_id"] = assignee_id
-        logs.append(("assigned", f"Assigned to {assignee['name']}"))
-        if assignee["queue"] and assignee["queue"] != t["queue"]:
-            fields["queue"] = assignee["queue"]
-            logs.append(("queue", f"Queue changed {t['queue']} → {assignee['queue']}"))
-        if t["status"] == Status.NEW.value:
-            fields["status"] = Status.OPEN.value
-            logs.append(("status", "new → open: triaged by assignment"))
-
     with _atomic(conn):
+        t = _ticket(conn, ticket_id)
+        actor = get_user(conn, actor_id)
+        if not is_agent(actor):
+            raise PermissionDenied("only agents can assign tickets")
+        if t["status"] == Status.CLOSED.value:
+            raise TicketError("closed tickets cannot be reassigned")
+
+        fields: dict[str, Any] = {}
+        logs: list[tuple[str, str]] = []
+        if assignee_id is None:
+            if t["assignee_id"] is None:
+                raise TicketError("ticket is already unassigned")
+            fields["assignee_id"] = None
+            logs.append(("assigned", "Unassigned"))
+        else:
+            assignee = get_user(conn, assignee_id)
+            if not is_agent(assignee):
+                raise TicketError(f"{assignee['name']} is not an agent")
+            if t["assignee_id"] == assignee_id:
+                raise TicketError(f"already assigned to {assignee['name']}")
+            fields["assignee_id"] = assignee_id
+            logs.append(("assigned", f"Assigned to {assignee['name']}"))
+            if assignee["queue"] and assignee["queue"] != t["queue"]:
+                fields["queue"] = assignee["queue"]
+                logs.append(("queue", f"Queue changed {t['queue']} → {assignee['queue']}"))
+            if t["status"] == Status.NEW.value:
+                fields["status"] = Status.OPEN.value
+                logs.append(("status", "new → open: triaged by assignment"))
+
         _update(conn, ticket_id, now, **fields)
         for kind, detail in logs:
             _log(conn, ticket_id, actor_id, kind, detail, now)
@@ -332,18 +340,18 @@ def add_comment(
     conn: Connection, ticket_id: int, data: CommentCreate, now: datetime | None = None
 ) -> int:
     now = now or utcnow()
-    t = _ticket(conn, ticket_id)
-    author = get_user(conn, data.author_id)
-    agent = is_agent(author)
-
-    if t["status"] == Status.CLOSED.value:
-        raise TicketError("closed tickets cannot receive comments; open a new ticket")
-    if data.internal and not agent:
-        raise PermissionDenied("only agents can post internal notes")
-    if not agent and author["id"] != t["requester_id"]:
-        raise PermissionDenied("requesters can only comment on their own tickets")
-
     with _atomic(conn):
+        t = _ticket(conn, ticket_id)
+        author = get_user(conn, data.author_id)
+        agent = is_agent(author)
+
+        if t["status"] == Status.CLOSED.value:
+            raise TicketError("closed tickets cannot receive comments; open a new ticket")
+        if data.internal and not agent:
+            raise PermissionDenied("only agents can post internal notes")
+        if not agent and author["id"] != t["requester_id"]:
+            raise PermissionDenied("requesters can only comment on their own tickets")
+
         comment_id: int = conn.execute(
             insert(comments)
             .values(
@@ -378,7 +386,7 @@ def add_comment(
             )
         else:
             _update(conn, ticket_id, now)
-    return comment_id
+        return comment_id
 
 
 # ---- queries -------------------------------------------------------------
