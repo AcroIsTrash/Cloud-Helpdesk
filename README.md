@@ -215,6 +215,11 @@ pass against Postgres with their assertions unchanged.
   ([ADR-0008](docs/adr/0008-migrations-run-as-a-one-off-ecs-task.md)). The app refuses to start on a
   database with no schema and tells you to run `alembic upgrade head`; a test
   checks it leaves the database empty.
+- **Seeding raced the same way.** Demo data is "if the table is empty, insert",
+  so 2–4 tasks booting together all saw an empty table: in a test with four
+  simultaneous starts, three crashed on the duplicate email. Seeding now runs
+  under a Postgres advisory lock, so one task seeds while the others wait,
+  then find the data and skip.
 - **Test isolation got harder.** A fresh in-memory SQLite per test was free.
   Starting a Postgres per test would be slow, so there is one container per
   session and the tables are truncated before each test (`RESTART IDENTITY`,
@@ -225,7 +230,9 @@ pass against Postgres with their assertions unchanged.
   in any collation. That's an assumption, so a test now pins "P1 first".
 - **Docker Hub rate limits.** In a sandbox without image pulls, testcontainers
   can't start. `TEST_DATABASE_URL` points the suite at an existing Postgres
-  instead, and that's how it was developed. CI uses the container.
+  instead. For cloud agent sessions, `.claude/hooks/session-start.sh` starts
+  the container's own Postgres and sets it, so every session can run the tests.
+  Your machine and CI still use Docker.
 
 ## Known simplifications (for now)
 

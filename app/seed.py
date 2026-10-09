@@ -23,6 +23,28 @@ SEED_USERS = [
 ]
 
 
+# Any fixed number works; it only has to be the same in every app task.
+SEED_LOCK = 20_261_009
+
+
+def seed_on_startup(conn: Connection, router: Router, demo: bool) -> None:
+    """Seed an empty database, safely when several app tasks start at once.
+
+    Seeding is check-then-insert, so tasks booting together would all see an
+    empty table. A Postgres advisory lock lets one task seed while the rest
+    wait, then find the data there and skip. The lock is held per session, so
+    it survives the commits the seed functions make.
+    """
+    conn.execute(select(func.pg_advisory_lock(SEED_LOCK)))
+    try:
+        seed_users(conn)
+        if demo:
+            seed_demo(conn, router)
+    finally:
+        conn.execute(select(func.pg_advisory_unlock(SEED_LOCK)))
+        conn.commit()
+
+
 def seed_users(conn: Connection) -> None:
     """Create the demo users on an empty database. The schema comes from Alembic."""
     if conn.scalar(select(func.count()).select_from(users)):

@@ -33,7 +33,7 @@ from .models import (
     TransitionRequest,
 )
 from .routing import KeywordRouter
-from .seed import seed_demo, seed_users
+from .seed import seed_on_startup
 
 # Swap this for an AI router later; nothing else needs to change.
 ROUTER = KeywordRouter()
@@ -49,9 +49,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 raise RuntimeError(
                     "database has no schema; run `uv run alembic upgrade head` first"
                 )
-            seed_users(conn)
-            if os.environ.get("HELPDESK_DEMO", "1") == "1":
-                seed_demo(conn, ROUTER)
+            seed_on_startup(conn, ROUTER, demo=os.environ.get("HELPDESK_DEMO", "1") == "1")
         app.state.engine = engine
         yield
     finally:
