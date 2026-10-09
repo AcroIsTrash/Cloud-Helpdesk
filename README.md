@@ -292,6 +292,12 @@ person active?" check, so once Deactivation commits it goes ahead and assigns
 the Ticket anyway. The lock has to come before the check, not just somewhere
 in the transaction.
 
+The same goes for two Admins switching each other off at once: each command
+locks both people's rows, always in id order so the two can't deadlock, and
+the second to run finds its own Admin already Deactivated and is refused. The
+desk can't end up with no active Admin that way
+(`tests/test_services.py::test_a_deactivated_admin_cannot_deactivate_anyone`).
+
 **Friction: Alembic doesn't see check constraints.** `alembic revision
 --autogenerate` picked up the new columns and the foreign key, but not the
 "at least one of `ticket_id`/`user_id`" check, and the CI drift check can't

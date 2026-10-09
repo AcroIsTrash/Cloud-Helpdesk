@@ -114,10 +114,11 @@ def list_users(
     conn: Connection, roles: set[str] | None = None, active_only: bool = False
 ) -> list[Row]:
     query = select(users).order_by(users.c.role, users.c.name)
+    if roles is not None:
+        query = query.where(users.c.role.in_(roles))
     if active_only:
         query = query.where(users.c.active)
-    rows = [dict(r) for r in conn.execute(query).mappings()]
-    return [r for r in rows if roles is None or r["role"] in roles]
+    return [dict(r) for r in conn.execute(query).mappings()]
 
 
 def _ticket(conn: Connection, ticket_id: int) -> Row:
@@ -135,25 +136,22 @@ def _ticket(conn: Connection, ticket_id: int) -> Row:
 
 def _log(
     conn: Connection,
-    ticket_id: int,
+    ticket_id: int | None,
     actor_id: int | None,
     kind: str,
     detail: str,
     now: datetime,
+    user_id: int | None = None,
 ) -> None:
+    """Append an Event about a ticket, a person's access (`user_id`), or both."""
     conn.execute(
         insert(events).values(
-            ticket_id=ticket_id, actor_id=actor_id, kind=kind, detail=detail, created_at=now
-        )
-    )
-
-
-def _log_access(
-    conn: Connection, user_id: int, actor_id: int, kind: str, detail: str, now: datetime
-) -> None:
-    conn.execute(
-        insert(events).values(
-            user_id=user_id, actor_id=actor_id, kind=kind, detail=detail, created_at=now
+            ticket_id=ticket_id,
+            user_id=user_id,
+            actor_id=actor_id,
+            kind=kind,
+            detail=detail,
+            created_at=now,
         )
     )
 
@@ -438,7 +436,7 @@ def deactivate(
             raise TicketError("a reason is required to deactivate someone")
 
         conn.execute(update(users).where(users.c.id == user_id).values(active=False))
-        _log_access(conn, user_id, actor_id, "user_deactivated", f"Deactivated: {reason}", now)
+        _log(conn, None, actor_id, "user_deactivated", f"Deactivated: {reason}", now, user_id)
         # The person's row is locked, so no `assign` to them can commit before this
         # does: no Ticket slips onto their name between this read and the commit.
         held = conn.execute(
@@ -467,16 +465,42 @@ def reactivate(conn: Connection, user_id: int, actor_id: int, now: datetime | No
         if person["active"]:
             raise TicketError(f"{person['name']} is already active")
         conn.execute(update(users).where(users.c.id == user_id).values(active=True))
-        _log_access(conn, user_id, actor_id, "user_reactivated", "Reactivated", now)
+        _log(conn, None, actor_id, "user_reactivated", "Reactivated", now, user_id)
 
 
 def _person_for_access_change(conn: Connection, user_id: int, actor_id: int) -> Row:
-    """The checks shared by Deactivation and reactivation; locks the person's row."""
-    if not is_admin(get_user(conn, actor_id)):
-        raise PermissionDenied("only admins can deactivate or reactivate people")
+    """The checks shared by Deactivation and reactivation.
+
+    Locks both the Admin's and the person's rows, always in id order so two
+    commands can't deadlock: two Admins switching each other off at once then
+    run one after the other, and the second finds itself deactivated.
+    """
     if user_id == actor_id:
         raise PermissionDenied("admins cannot deactivate or reactivate themselves")
-    return _locked_user(conn, user_id)
+    rows = {
+        r["id"]: dict(r)
+        for r in conn.execute(
+            select(users)
+            .where(users.c.id.in_([user_id, actor_id]))
+            .order_by(users.c.id)
+            .with_for_update()
+        ).mappings()
+    }
+    actor = rows.get(actor_id)
+    if actor is None or not is_admin(actor):
+        raise PermissionDenied("only admins can deactivate or reactivate people")
+    if not actor["active"]:
+        raise PermissionDenied(f"{actor['name']} is deactivated")
+    if user_id not in rows:
+        raise NotFound(f"user {user_id} not found")
+    return rows[user_id]
+
+
+def people(conn: Connection, viewer: Row) -> list[Row]:
+    """Everyone, active or not, for an Admin managing access."""
+    if not is_admin(viewer):
+        raise PermissionDenied("only admins can manage people")
+    return list_users(conn)
 
 
 def access_events(conn: Connection, user_id: int) -> list[Row]:

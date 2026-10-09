@@ -512,11 +512,11 @@ def assign_form(
 def people_page(
     request: Request, user: svc.Row = Depends(current_user), conn: Connection = Depends(get_conn)
 ) -> HTMLResponse:
-    if not svc.is_admin(user):
-        return render(
-            request, "error.html", user, status_code=403, message="only admins can manage people"
-        )
-    return render(request, "people.html", user, people=svc.list_users(conn))
+    try:
+        people = svc.people(conn, viewer=user)
+    except svc.PermissionDenied as e:
+        return render(request, "error.html", user, status_code=403, message=str(e))
+    return render(request, "people.html", user, people=people)
 
 
 @app.post("/people/{user_id}/deactivate", include_in_schema=False)

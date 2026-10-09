@@ -3,7 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import insert, select, update
 
 from app import services as svc
 from app.db import users
@@ -425,3 +425,17 @@ def _wait_until_blocked(engine, timeout=5.0):
                 return
             time.sleep(0.02)
     raise AssertionError("nothing ever waited on the lock")
+
+
+def test_a_deactivated_admin_cannot_deactivate_anyone(conn, ids):
+    """Two Admins switching each other off must not leave the desk with none."""
+    other = conn.execute(
+        insert(users)
+        .values(name="Robin Admin", email="robin@example.com", role="admin")
+        .returning(users.c.id)
+    ).scalar_one()
+    conn.commit()
+    svc.deactivate(conn, ids["morgan"], other, "Handover", at(1))
+    with pytest.raises(svc.PermissionDenied, match="deactivated"):
+        svc.deactivate(conn, other, ids["morgan"], "Revenge", at(2))
+    assert svc.get_user(conn, other)["active"] is True
