@@ -1,15 +1,26 @@
-"""Demo users and tickets so the app looks alive on first launch."""
+"""Demo people and tickets, loaded by a command separate from the migrations.
+
+Every bring-up starts from an empty database (ADR-0001), so the deploy step
+runs this after `alembic upgrade head`:
+
+    python -m app.seed          # people and demo tickets
+    HELPDESK_DEMO=0 python -m app.seed   # people only
+
+Running it again changes nothing. This is demo data only; it is never reused
+as eval data (ADR-0013).
+"""
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timedelta
 
 from sqlalchemy import Connection, func, insert, select
 
 from . import services as svc
-from .db import tickets, users
+from .db import make_engine, tickets, users
 from .models import CommentCreate, Level, Status, TicketCreate
-from .routing import Router
+from .routing import KeywordRouter, Router
 
 SEED_USERS = [
     ("Alice Chen", "alice@example.com", "requester", None),
@@ -23,17 +34,26 @@ SEED_USERS = [
 ]
 
 
-# Any fixed number works; it only has to be the same in every app task.
+# Any fixed number works; it only has to be the same in every seed run.
 SEED_LOCK = 20_261_009
 
 
-def seed_on_startup(conn: Connection, router: Router, demo: bool) -> None:
-    """Seed an empty database, safely when several app tasks start at once.
+def main() -> None:
+    engine = make_engine()
+    try:
+        with engine.connect() as conn:
+            seed(conn, KeywordRouter(), demo=os.environ.get("HELPDESK_DEMO", "1") == "1")
+    finally:
+        engine.dispose()
 
-    Seeding is check-then-insert, so tasks booting together would all see an
-    empty table. A Postgres advisory lock lets one task seed while the rest
-    wait, then find the data there and skip. The lock is held per session, so
-    it survives the commits the seed functions make.
+
+def seed(conn: Connection, router: Router, demo: bool) -> None:
+    """Seed an empty database; skip whatever is already there.
+
+    Seeding is check-then-insert, so two runs at once (a retried one-off task,
+    say) would both see an empty table. A Postgres advisory lock lets one run
+    seed while the other waits, then finds the data there and skips. The lock
+    is held per session, so it survives the commits the seed functions make.
     """
     conn.execute(select(func.pg_advisory_lock(SEED_LOCK)))
     try:
@@ -187,3 +207,7 @@ def seed_demo(conn: Connection, router: Router) -> None:
         router,
         ago(minutes=10),
     )
+
+
+if __name__ == "__main__":
+    main()

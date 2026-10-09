@@ -9,12 +9,15 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import services as svc
+from app.routing import KeywordRouter
+from app.seed import seed
 
 
 @pytest.fixture
-def client(empty_db, monkeypatch) -> Iterator[TestClient]:
+def client(engine, empty_db, monkeypatch) -> Iterator[TestClient]:
+    with engine.connect() as c:
+        seed(c, KeywordRouter(), demo=True)
     monkeypatch.setenv("DATABASE_URL", empty_db)
-    monkeypatch.setenv("HELPDESK_DEMO", "1")
     monkeypatch.setenv("HELPDESK_DEV_LOGIN", "1")
     from app.main import app
 
@@ -150,3 +153,18 @@ def test_login_redirect_stays_on_this_site(client, ids):
         )
         expected = target if target == "/tickets/1" else "/"
         assert r.headers["location"] == expected, target
+
+
+def test_healthz_needs_no_login_and_reports_the_database(client):
+    from app.db import make_engine
+
+    assert client.get("/healthz").status_code == 200
+
+    # The database goes away: nothing listens on port 1.
+    up = client.app.state.engine
+    client.app.state.engine = make_engine("postgresql+psycopg://helpdesk@127.0.0.1:1/helpdesk")
+    try:
+        assert client.get("/healthz").status_code == 503
+    finally:
+        client.app.state.engine.dispose()
+        client.app.state.engine = up

@@ -5,6 +5,7 @@ Run:  uv run python -m uvicorn app.main:app --reload
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -16,7 +17,8 @@ from fastapi import Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
-from sqlalchemy import Connection, inspect
+from sqlalchemy import Connection, inspect, text
+from sqlalchemy.exc import SQLAlchemyError
 
 from . import services as svc
 from .auth import DevLoginPicker, IdentitySource, NoLogin
@@ -36,7 +38,8 @@ from .models import (
     TransitionRequest,
 )
 from .routing import KeywordRouter
-from .seed import seed_on_startup
+
+log = logging.getLogger(__name__)
 
 # Swap this for an AI router later; nothing else needs to change.
 ROUTER = KeywordRouter()
@@ -56,7 +59,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 raise RuntimeError(
                     "database has no schema; run `uv run alembic upgrade head` first"
                 )
-            seed_on_startup(conn, ROUTER, demo=settings.demo)
         app.state.engine = engine
         app.state.identity = identity
         yield
@@ -130,6 +132,21 @@ def _duration(minutes: int | None) -> str:
 templates.env.filters["ago"] = _ago
 templates.env.filters["duration"] = _duration
 templates.env.filters["label"] = lambda v: str(v).replace("_", " ")
+
+
+# ---- health --------------------------------------------------------------------
+
+
+@app.get("/healthz", include_in_schema=False)
+def healthz(request: Request) -> JSONResponse:
+    """For the load balancer: can this task reach the database? No login needed."""
+    try:
+        with request.app.state.engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+    except SQLAlchemyError:
+        log.warning("health check failed: database unreachable", exc_info=True)
+        return JSONResponse({"status": "database unreachable"}, status_code=503)
+    return JSONResponse({"status": "ok"})
 
 
 # ---- JSON API ----------------------------------------------------------------
