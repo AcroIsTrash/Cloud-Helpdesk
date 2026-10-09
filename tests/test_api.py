@@ -1,66 +1,152 @@
+"""HTTP tests: only what the web layer adds. Rules are tested in test_services.py.
+
+Every test logs in through the dev login picker, the way a person would.
+"""
+
+from collections.abc import Iterator
+
+import pytest
 from fastapi.testclient import TestClient
 
+from app import services as svc
 
-def test_api_and_ui(empty_db, monkeypatch):
+
+@pytest.fixture
+def client(empty_db, monkeypatch) -> Iterator[TestClient]:
     monkeypatch.setenv("DATABASE_URL", empty_db)
     monkeypatch.setenv("HELPDESK_DEMO", "1")
+    monkeypatch.setenv("HELPDESK_DEV_LOGIN", "1")
     from app.main import app
 
-    with TestClient(app) as client:
-        users = {u["email"].split("@")[0]: u["id"] for u in client.get("/api/users").json()}
+    with TestClient(app) as c:
+        yield c
 
-        r = client.post(
+
+@pytest.fixture
+def ids(client, engine) -> dict[str, int]:
+    with engine.connect() as c:
+        return {u["email"].split("@")[0]: u["id"] for u in svc.list_users(c)}
+
+
+def login(client: TestClient, user_id: int) -> None:
+    r = client.post("/login", data={"user_id": user_id}, follow_redirects=False)
+    assert r.status_code == 303
+
+
+def test_not_logged_in_pages_redirect_to_login_and_api_says_401(client):
+    for path in ("/", "/tickets/new", "/tickets/1"):
+        r = client.get(path, follow_redirects=False)
+        assert r.status_code == 303, path
+        assert r.headers["location"].startswith("/login"), path
+    for path in ("/api/tickets", "/api/tickets/1", "/api/users"):
+        assert client.get(path).status_code == 401, path
+    assert client.post("/api/tickets", json={}).status_code == 401
+    assert client.get("/login").status_code == 200
+
+
+def test_requester_cannot_open_someone_elses_ticket(client, ids):
+    login(client, ids["alice"])
+    mine = client.post(
+        "/api/tickets",
+        json={"title": "Monitor is dead", "description": "No power light at all."},
+    ).json()["ticket"]
+    login(client, ids["bob"])
+    assert client.get(f"/api/tickets/{mine['id']}").status_code == 403
+    assert client.get(f"/tickets/{mine['id']}").status_code == 403
+    assert mine["id"] not in [t["id"] for t in client.get("/api/tickets").json()]
+
+
+@pytest.mark.parametrize(
+    "path,body",
+    [
+        (
             "/api/tickets",
-            json={
-                "title": "Printer jammed on floor 3",
+            {
+                "title": "Printer jammed",
                 "description": "Paper jam, won't clear.",
-                "requester_id": users["bob"],
-                "impact": "low",
-                "urgency": "high",
+                "requester_id": 1,
             },
-        )
-        assert r.status_code == 201
-        t = r.json()["ticket"]
-        assert (t["priority"], t["queue"]) == ("P3", "Desktop Support")
+        ),
+        ("/api/tickets/1/transition", {"to_status": "open", "actor_id": 1}),
+        ("/api/tickets/1/assign", {"assignee_id": None, "actor_id": 1}),
+        ("/api/tickets/1/comments", {"body": "hello", "author_id": 1}),
+    ],
+)
+def test_bodies_naming_who_is_acting_are_rejected(client, ids, path, body):
+    login(client, ids["dana"])
+    r = client.post(path, json=body)
+    assert r.status_code == 422
+    assert r.json()["detail"][0]["type"] == "extra_forbidden"
 
-        bad = client.post(
-            f"/api/tickets/{t['id']}/transition",
-            json={"actor_id": users["priya"], "to_status": "resolved", "note": "x"},
-        )
-        assert bad.status_code == 400
 
-        denied = client.post(
-            f"/api/tickets/{t['id']}/assign",
-            json={"actor_id": users["bob"], "assignee_id": users["priya"]},
-        )
-        assert denied.status_code == 403
+def test_every_page_renders_for_each_role(client, ids):
+    for name in ("alice", "dana", "morgan"):  # Requester, Agent, Admin
+        login(client, ids[name])
+        for path in ("/", "/?status=all", "/?mine=true", "/tickets/new", "/tickets/1"):
+            assert client.get(path).status_code == 200, (name, path)
 
-        assert client.get("/api/tickets/9999").status_code == 404
-        assert len(client.get("/api/tickets").json()) >= 5  # demo data + ours
 
-        # every page renders, for both an agent and a requester
-        for uid in (users["dana"], users["alice"]):
-            client.cookies.set("acting_as", str(uid))
-            for path in ("/", "/?status=all", "/tickets/new", "/tickets/1"):
-                assert client.get(path).status_code == 200, path
+def test_api_status_codes(client, ids):
+    login(client, ids["bob"])
+    r = client.post(
+        "/api/tickets",
+        json={
+            "title": "Printer jammed on floor 3",
+            "description": "Paper jam, won't clear.",
+            "impact": "low",
+            "urgency": "high",
+        },
+    )
+    assert r.status_code == 201
+    t = r.json()["ticket"]
+    assert (t["priority"], t["queue"], t["requester_id"]) == ("P3", "Desktop Support", ids["bob"])
 
-        client.cookies.set("acting_as", str(users["alice"]))
+    denied = client.post(f"/api/tickets/{t['id']}/assign", json={"assignee_id": ids["priya"]})
+    assert denied.status_code == 403
+
+    login(client, ids["priya"])
+    bad = client.post(
+        f"/api/tickets/{t['id']}/transition", json={"to_status": "resolved", "note": "x"}
+    )
+    assert bad.status_code == 400
+    assert client.get("/api/tickets/9999").status_code == 404
+    assert len(client.get("/api/tickets").json()) >= 6  # demo data + ours
+
+
+def test_html_forms_act_as_the_logged_in_person(client, ids):
+    login(client, ids["alice"])
+    r = client.post(
+        "/tickets",
+        data={
+            "title": "Monitor is dead",
+            "description": "No power light at all.",
+            "impact": "low",
+            "urgency": "medium",
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 303 and r.headers["location"].startswith("/tickets/")
+    ticket = client.get("/api/tickets/" + r.headers["location"].rsplit("/", 1)[1]).json()
+    assert ticket["ticket"]["requester_id"] == ids["alice"]
+
+
+def test_a_tampered_session_cookie_is_not_logged_in(client, ids):
+    login(client, ids["alice"])
+    signature = client.cookies["session"].split(".", 1)[1]
+    client.cookies.set("session", f"{ids['morgan']}.{signature}")
+    assert client.get("/api/tickets").status_code == 401
+
+
+def test_logging_out_ends_the_session(client, ids):
+    login(client, ids["alice"])
+    assert client.post("/logout", follow_redirects=False).status_code == 303
+    assert client.get("/api/tickets").status_code == 401
+
+
+def test_login_redirect_stays_on_this_site(client, ids):
+    for target in ("//evil.example", "/\\evil.example", "https://evil.example", "/tickets/1"):
         r = client.post(
-            "/tickets",
-            data={
-                "title": "Monitor is dead",
-                "description": "No power light at all.",
-                "impact": "low",
-                "urgency": "medium",
-            },
-            follow_redirects=False,
+            "/login", data={"user_id": ids["dana"], "next": target}, follow_redirects=False
         )
-        assert r.status_code == 303 and r.headers["location"].startswith("/tickets/")
-
-        # the "acting as" switcher must not be usable as an open redirect
-        for target in ("//evil.example", "/\\evil.example", "https://evil.example", "/tickets/1"):
-            r = client.post(
-                "/act-as", data={"user_id": users["dana"], "next": target}, follow_redirects=False
-            )
-            expected = target if target == "/tickets/1" else "/"
-            assert r.headers["location"] == expected, target
+        expected = target if target == "/tickets/1" else "/"
+        assert r.headers["location"] == expected, target

@@ -408,14 +408,20 @@ def _ticket_select() -> Select[Any]:
     )
 
 
+def _own_tickets_only(viewer: Row | None) -> int | None:
+    """The requester id to filter on: requesters see only their own tickets."""
+    return viewer["id"] if viewer is not None and not is_agent(viewer) else None
+
+
 def list_tickets(
     conn: Connection,
     status: Status | None = None,
     include_closed: bool = False,
     queue: str | None = None,
     assignee_id: int | None = None,
-    requester_id: int | None = None,
+    viewer: Row | None = None,
 ) -> list[Row]:
+    """Tickets matching the filters that `viewer` may see (None = everything)."""
     query = _ticket_select()
     if status is not None:
         query = query.where(tickets.c.status == status.value)
@@ -424,7 +430,7 @@ def list_tickets(
     for col, val in (
         (tickets.c.queue, queue),
         (tickets.c.assignee_id, assignee_id),
-        (tickets.c.requester_id, requester_id),
+        (tickets.c.requester_id, _own_tickets_only(viewer)),
     ):
         if val is not None:
             query = query.where(col == val)
@@ -433,10 +439,10 @@ def list_tickets(
     return [dict(r) for r in conn.execute(query).mappings()]
 
 
-def status_counts(conn: Connection, requester_id: int | None = None) -> dict[str, int]:
+def status_counts(conn: Connection, viewer: Row | None = None) -> dict[str, int]:
     counts = {s.value: 0 for s in Status}
     query = select(tickets.c.status, func.count()).group_by(tickets.c.status)
-    if requester_id is not None:
+    if (requester_id := _own_tickets_only(viewer)) is not None:
         query = query.where(tickets.c.requester_id == requester_id)
     for status, n in conn.execute(query):
         counts[status] = n

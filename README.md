@@ -28,12 +28,14 @@ terms are defined in the [glossary](GLOSSARY.md).
 
 The app has been imported from [`helpdesk`](https://github.com/AcroIsTrash/helpdesk)
 with its behaviour unchanged, and now runs on PostgreSQL with Alembic
-migrations. Login, docker-compose and the AWS deployment come next; the
+migrations. Every request now belongs to a logged-in person. Deactivation,
+docker-compose and the AWS deployment come next; the
 [stack](docs/stack.md) lists every piece and why it was chosen.
 
 - [x] Import the app on Python 3.13, with CI
 - [x] Postgres + Alembic, tests against a real database
-- [ ] Phase 1 (rest): a login seam, docker-compose
+- [x] A login seam: one `current_user` for pages and API, a dev login picker
+- [ ] Phase 1 (rest): Deactivation, docker-compose
 - [ ] Phase 2: Terraform (VPC, ECS Fargate, RDS, ALB) and a deploy pipeline
 - [ ] Phase 3: an LLM router, evaluated against the keyword baseline
 - [ ] Phase 4: suggested replies, summaries, duplicate detection
@@ -85,17 +87,21 @@ docker run -d --name helpdesk-db -p 5432:5432 \
   pgvector/pgvector:pg16
 uv sync
 uv run alembic upgrade head      # creates the schema; the app never does
-uv run python -m uvicorn app.main:app --reload
+HELPDESK_DEV_LOGIN=1 uv run python -m uvicorn app.main:app --reload
 ```
 
-Open http://localhost:8000; the API docs are at http://localhost:8000/docs. The
-first launch creates demo users and tickets. The **Acting as** menu (top right)
-switches between agent and requester views; real login comes in phase 1.
+Open http://localhost:8000 and pick someone on the login page; the API docs are
+at http://localhost:8000/docs. The first launch creates demo users and tickets.
+Log out (top right) and back in as someone else to compare a Requester's view
+with an Agent's.
 
 | Setting | Default | Effect |
 |---|---|---|
 | `DATABASE_URL` | `postgresql+psycopg://helpdesk:helpdesk@localhost:5432/helpdesk` | The database the app and Alembic use |
 | `HELPDESK_DEMO` | `1` | Set to `0` to start without demo tickets |
+| `HELPDESK_DEV_LOGIN` | `0` | Set to `1` to enable the dev login picker (anyone can log in as anyone) |
+| `HELPDESK_ENV` | `local` | `local` or `aws`; the app refuses to start with the picker on in `aws` |
+| `HELPDESK_SESSION_SECRET` | random per start | Signs the session cookie; without it, a restart logs everyone out |
 
 ## Run the tests and checks
 
@@ -136,6 +142,58 @@ before committing:
 uv run alembic revision --autogenerate -m "what changed"
 ```
 
+## Login: authentication, authorization, accounting
+
+Every request belongs to a logged-in person, and who that person is comes from
+one place: the `current_user` dependency in `app/main.py`. Every page and API
+route takes it, except `/healthz` and the login page itself. No request body
+says who is acting any more; before this, the HTML trusted an "Acting as"
+cookie holding any user id and the API trusted an `actor_id` field, so a
+Requester could assign tickets or read Internal notes by typing an Agent's id.
+
+The design splits along the classic **AAA** lines, the same split a network
+engineer knows from RADIUS and TACACS+:
+
+- **Authentication: who are you?** An *identity source* (`app/auth.py`) takes a
+  request and returns a person's id, or nothing. Phase 1 has one, the dev login
+  picker: choose a person from a list and get a session cookie, signed with
+  HMAC so the browser can't edit it into another id. The JSON API reads the
+  same cookie for now.
+- **Authorization: what may you do?** The permission rules in the service
+  layer (`app/services.py`): a Requester sees and comments on only their own
+  Tickets (anything else is a 403, even a guessed Ticket number), and only
+  Agents assign, triage or write Internal notes. The web layer passes the
+  logged-in person in and decides nothing itself. That closed two holes in the
+  API, which used to call the services without a viewer: any caller could read
+  any Ticket, Internal notes included, and list every Ticket
+  (`tests/test_api.py::test_requester_cannot_open_someone_elses_ticket`).
+- **Accounting: what did you do?** Every change writes an Event naming the
+  person, in the same transaction as the change. Because that person now comes
+  from the session, the audit trail can be trusted.
+
+Not logged in, a page redirects to `/login` and the API answers 401.
+
+**Why a seam, and why Cognito drops in later.** Routes ask `current_user`; only
+the identity source knows how login works. Phase 2 adds a source that
+validates Cognito JWTs (cookie for pages, Bearer token for the API) and maps
+Cognito groups to Requester, Agent and Admin
+([ADR-0012](docs/adr/0012-app-validates-cognito-tokens.md)). No route changes.
+
+**A picker that can't leak into production.** The picker lets anyone be
+anyone, which is exactly what local testing needs and exactly what must never
+reach AWS. It's off unless `HELPDESK_DEV_LOGIN=1`, and the app refuses to
+start if it's on with `HELPDESK_ENV=aws` (`tests/test_config.py`). A config
+mistake fails the deploy instead of opening the app.
+
+**Rejecting the old request shape.** Removing `actor_id` (and `requester_id`
+on ticket creation) is a breaking API change. The tempting soft option is to
+ignore the field, but then an old client keeps "working" while its requests
+are silently attributed to whoever is logged in. Instead, every request body
+now refuses unknown fields with a 422 (`extra="forbid"`; `tests/test_api.py`
+checks each one), so a client we don't control fails loudly and its owner
+finds out. The schema says so too: `additionalProperties: false` in the
+OpenAPI snapshot.
+
 ## Project layout
 
 ```
@@ -145,6 +203,8 @@ app/
   routing.py    Router interface + KeywordRouter baseline
   db.py         table declarations (SQLAlchemy Core) and the engine
   seed.py       demo users and tickets
+  auth.py       identity sources: who is making a request (the login seam)
+  config.py     settings from environment variables, and the startup guard
   main.py       FastAPI: JSON API under /api, HTML pages elsewhere
   templates/    Jinja2 pages
 migrations/     Alembic migrations, generated from app/db.py
@@ -236,5 +296,7 @@ pass against Postgres with their assertions unchanged.
 
 ## Known simplifications (for now)
 
-- No authentication: the "Acting as" menu stands in for it until phase 1.
+- Login is a dev-only picker until Cognito arrives in phase 2; its sessions
+  last until the browser closes and are not tied to the person's `active` flag
+  yet (Deactivation is the next ticket).
 - SLAs use calendar time, not business hours.
