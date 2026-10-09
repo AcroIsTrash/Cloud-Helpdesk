@@ -2,11 +2,8 @@
   "components": {
     "schemas": {
       "AssignRequest": {
+        "additionalProperties": false,
         "properties": {
-          "actor_id": {
-            "title": "Actor Id",
-            "type": "integer"
-          },
           "assignee_id": {
             "anyOf": [
               {
@@ -20,7 +17,6 @@
           }
         },
         "required": [
-          "actor_id",
           "assignee_id"
         ],
         "title": "AssignRequest",
@@ -37,12 +33,9 @@
         "title": "Category",
         "type": "string"
       },
-      "CommentCreate": {
+      "CommentRequest": {
+        "additionalProperties": false,
         "properties": {
-          "author_id": {
-            "title": "Author Id",
-            "type": "integer"
-          },
           "body": {
             "maxLength": 5000,
             "minLength": 1,
@@ -56,10 +49,9 @@
           }
         },
         "required": [
-          "author_id",
           "body"
         ],
-        "title": "CommentCreate",
+        "title": "CommentRequest",
         "type": "object"
       },
       "HTTPValidationError": {
@@ -96,7 +88,8 @@
         "title": "Status",
         "type": "string"
       },
-      "TicketCreate": {
+      "TicketRequest": {
+        "additionalProperties": false,
         "properties": {
           "category": {
             "anyOf": [
@@ -118,10 +111,6 @@
             "$ref": "#/components/schemas/Level",
             "default": "medium"
           },
-          "requester_id": {
-            "title": "Requester Id",
-            "type": "integer"
-          },
           "title": {
             "maxLength": 120,
             "minLength": 5,
@@ -135,18 +124,14 @@
         },
         "required": [
           "title",
-          "description",
-          "requester_id"
+          "description"
         ],
-        "title": "TicketCreate",
+        "title": "TicketRequest",
         "type": "object"
       },
       "TransitionRequest": {
+        "additionalProperties": false,
         "properties": {
-          "actor_id": {
-            "title": "Actor Id",
-            "type": "integer"
-          },
           "note": {
             "anyOf": [
               {
@@ -163,7 +148,6 @@
           }
         },
         "required": [
-          "actor_id",
           "to_status"
         ],
         "title": "TransitionRequest",
@@ -311,7 +295,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/TicketCreate"
+                "$ref": "#/components/schemas/TicketRequest"
               }
             }
           },
@@ -451,7 +435,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/CommentCreate"
+                "$ref": "#/components/schemas/CommentRequest"
               }
             }
           },

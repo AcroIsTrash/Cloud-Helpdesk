@@ -5,7 +5,6 @@ Run:  uv run python -m uvicorn app.main:app --reload
 
 from __future__ import annotations
 
-import os
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -13,13 +12,15 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
-from fastapi import Depends, FastAPI, Form, Request
+from fastapi import Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
 from sqlalchemy import Connection, inspect
 
 from . import services as svc
+from .auth import DevLoginPicker, IdentitySource, NoLogin
+from .config import Settings
 from .db import make_engine
 from .models import (
     ALL_QUEUES,
@@ -27,9 +28,11 @@ from .models import (
     AssignRequest,
     Category,
     CommentCreate,
+    CommentRequest,
     Level,
     Status,
     TicketCreate,
+    TicketRequest,
     TransitionRequest,
 )
 from .routing import KeywordRouter
@@ -41,6 +44,10 @@ ROUTER = KeywordRouter()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    settings = Settings.from_env()  # raises, so the app won't start, on unsafe config
+    identity: IdentitySource = (
+        DevLoginPicker(settings.session_secret) if settings.dev_login else NoLogin()
+    )
     engine = make_engine()
     try:
         with engine.connect() as conn:
@@ -49,8 +56,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 raise RuntimeError(
                     "database has no schema; run `uv run alembic upgrade head` first"
                 )
-            seed_on_startup(conn, ROUTER, demo=os.environ.get("HELPDESK_DEMO", "1") == "1")
+            seed_on_startup(conn, ROUTER, demo=settings.demo)
         app.state.engine = engine
+        app.state.identity = identity
         yield
     finally:
         engine.dispose()
@@ -64,6 +72,29 @@ def get_conn(request: Request) -> Iterator[Connection]:
     # Closing the connection rolls back anything a failed request left uncommitted.
     with request.app.state.engine.connect() as conn:
         yield conn
+
+
+class NotLoggedIn(Exception):
+    """No identity source recognised the request, or the person no longer exists."""
+
+
+def current_user(request: Request, conn: Connection = Depends(get_conn)) -> svc.Row:
+    """The person making this request. Every route but /healthz and the login page needs it."""
+    user_id = request.app.state.identity.identify(request)
+    if user_id is None:
+        raise NotLoggedIn
+    try:
+        return svc.get_user(conn, user_id)
+    except svc.NotFound:
+        raise NotLoggedIn from None
+
+
+@app.exception_handler(NotLoggedIn)
+async def not_logged_in_handler(request: Request, _: NotLoggedIn) -> Response:
+    if request.url.path.startswith("/api/"):
+        return JSONResponse({"detail": "not logged in"}, status_code=401)
+    target = request.url.path + (f"?{request.url.query}" if request.url.query else "")
+    return RedirectResponse(f"/login?{urlencode({'next': target})}", status_code=303)
 
 
 # ---- template filters ------------------------------------------------------
@@ -117,7 +148,9 @@ async def ticket_error_handler(_: Request, exc: svc.TicketError) -> JSONResponse
 
 
 @app.get("/api/users", tags=["api"], response_model=None)
-def api_users(conn: Connection = Depends(get_conn)) -> list[svc.Row]:
+def api_users(
+    _: svc.Row = Depends(current_user), conn: Connection = Depends(get_conn)
+) -> list[svc.Row]:
     return svc.list_users(conn)
 
 
@@ -127,70 +160,83 @@ def api_list(
     include_closed: bool = False,
     queue: str | None = None,
     assignee_id: int | None = None,
+    user: svc.Row = Depends(current_user),
     conn: Connection = Depends(get_conn),
 ) -> list[svc.Row]:
     rows = svc.list_tickets(
-        conn, status=status, include_closed=include_closed, queue=queue, assignee_id=assignee_id
+        conn,
+        status=status,
+        include_closed=include_closed,
+        queue=queue,
+        assignee_id=assignee_id,
+        requester_id=None if svc.is_agent(user) else user["id"],
     )
     return [r | {"sla": svc.sla_status(r)} for r in rows]
 
 
 @app.post("/api/tickets", status_code=201, tags=["api"], response_model=None)
-def api_create(body: TicketCreate, conn: Connection = Depends(get_conn)) -> svc.Row:
-    tid = svc.create_ticket(conn, body, ROUTER)
-    return svc.ticket_detail(conn, tid)
+def api_create(
+    body: TicketRequest,
+    user: svc.Row = Depends(current_user),
+    conn: Connection = Depends(get_conn),
+) -> svc.Row:
+    data = TicketCreate(**body.model_dump(), requester_id=user["id"])
+    tid = svc.create_ticket(conn, data, ROUTER)
+    return svc.ticket_detail(conn, tid, viewer=user)
 
 
 @app.get("/api/tickets/{ticket_id}", tags=["api"], response_model=None)
-def api_detail(ticket_id: int, conn: Connection = Depends(get_conn)) -> svc.Row:
-    return svc.ticket_detail(conn, ticket_id)
+def api_detail(
+    ticket_id: int, user: svc.Row = Depends(current_user), conn: Connection = Depends(get_conn)
+) -> svc.Row:
+    return svc.ticket_detail(conn, ticket_id, viewer=user)
 
 
 @app.post("/api/tickets/{ticket_id}/transition", tags=["api"], response_model=None)
 def api_transition(
-    ticket_id: int, body: TransitionRequest, conn: Connection = Depends(get_conn)
+    ticket_id: int,
+    body: TransitionRequest,
+    user: svc.Row = Depends(current_user),
+    conn: Connection = Depends(get_conn),
 ) -> svc.Row:
-    svc.transition(conn, ticket_id, body.actor_id, body.to_status, body.note)
-    return svc.ticket_detail(conn, ticket_id)
+    svc.transition(conn, ticket_id, user["id"], body.to_status, body.note)
+    return svc.ticket_detail(conn, ticket_id, viewer=user)
 
 
 @app.post("/api/tickets/{ticket_id}/assign", tags=["api"], response_model=None)
 def api_assign(
-    ticket_id: int, body: AssignRequest, conn: Connection = Depends(get_conn)
+    ticket_id: int,
+    body: AssignRequest,
+    user: svc.Row = Depends(current_user),
+    conn: Connection = Depends(get_conn),
 ) -> svc.Row:
-    svc.assign(conn, ticket_id, body.actor_id, body.assignee_id)
-    return svc.ticket_detail(conn, ticket_id)
+    svc.assign(conn, ticket_id, user["id"], body.assignee_id)
+    return svc.ticket_detail(conn, ticket_id, viewer=user)
 
 
 @app.post("/api/tickets/{ticket_id}/comments", status_code=201, tags=["api"], response_model=None)
 def api_comment(
-    ticket_id: int, body: CommentCreate, conn: Connection = Depends(get_conn)
+    ticket_id: int,
+    body: CommentRequest,
+    user: svc.Row = Depends(current_user),
+    conn: Connection = Depends(get_conn),
 ) -> svc.Row:
-    svc.add_comment(conn, ticket_id, body)
-    return svc.ticket_detail(conn, ticket_id)
+    svc.add_comment(conn, ticket_id, CommentCreate(**body.model_dump(), author_id=user["id"]))
+    return svc.ticket_detail(conn, ticket_id, viewer=user)
 
 
 # ---- HTML UI -----------------------------------------------------------------
-# No real auth: an "acting as" switcher stores a user id in a cookie so you can
-# demo the requester and agent views side by side.
 
 
-def current_user(request: Request, conn: Connection) -> svc.Row:
-    try:
-        return svc.get_user(conn, int(request.cookies.get("acting_as", "")))
-    except (ValueError, svc.NotFound):
-        return svc.list_users(conn, roles={"agent"})[0]
-
-
-def render(request: Request, conn: Connection, name: str, **ctx: Any) -> HTMLResponse:
-    user = current_user(request, conn)
+def render(
+    request: Request, name: str, user: svc.Row | None, status_code: int = 200, **ctx: Any
+) -> HTMLResponse:
     ctx.update(
-        users=svc.list_users(conn),
         current_user=user,
-        is_agent=svc.is_agent(user),
+        is_agent=user is not None and svc.is_agent(user),
         error=request.query_params.get("error"),
     )
-    return templates.TemplateResponse(request, name, ctx)
+    return templates.TemplateResponse(request, name, ctx, status_code=status_code)
 
 
 def back(path: str, error: Exception | str | None = None) -> RedirectResponse:
@@ -198,13 +244,54 @@ def back(path: str, error: Exception | str | None = None) -> RedirectResponse:
     return RedirectResponse(url, status_code=303)
 
 
-@app.post("/act-as", include_in_schema=False)
-def act_as(user_id: int = Form(...), next: str = Form("/")) -> RedirectResponse:
+def _same_site(path: str) -> str:
     # Only same-site paths: "//host" and "/\host" are protocol-relative URLs.
-    if not next.startswith("/") or next[1:2] in {"/", "\\"}:
-        next = "/"
-    resp = RedirectResponse(next, status_code=303)
-    resp.set_cookie("acting_as", str(user_id), httponly=True, samesite="lax")
+    return path if path.startswith("/") and path[1:2] not in {"/", "\\"} else "/"
+
+
+# ---- dev login picker ----------------------------------------------------------
+# The picker's own pages. With another identity source they have nothing to do.
+
+
+@app.get("/login", response_class=HTMLResponse, include_in_schema=False)
+def login_page(
+    request: Request, next: str = "/", conn: Connection = Depends(get_conn)
+) -> HTMLResponse:
+    picker = isinstance(request.app.state.identity, DevLoginPicker)
+    return render(
+        request,
+        "login.html",
+        None,
+        people=svc.list_users(conn) if picker else [],
+        picker=picker,
+        next=_same_site(next),
+    )
+
+
+@app.post("/login", include_in_schema=False)
+def login(
+    request: Request,
+    user_id: int = Form(...),
+    next: str = Form("/"),
+    conn: Connection = Depends(get_conn),
+) -> RedirectResponse:
+    picker = request.app.state.identity
+    if not isinstance(picker, DevLoginPicker):
+        raise HTTPException(404)
+    try:
+        svc.get_user(conn, user_id)
+    except svc.NotFound as e:
+        return back("/login", e)
+    resp = RedirectResponse(_same_site(next), status_code=303)
+    picker.log_in(resp, user_id)
+    return resp
+
+
+@app.post("/logout", include_in_schema=False)
+def logout(request: Request) -> RedirectResponse:
+    resp = RedirectResponse("/login", status_code=303)
+    if isinstance(picker := request.app.state.identity, DevLoginPicker):
+        picker.log_out(resp)
     return resp
 
 
@@ -214,9 +301,9 @@ def index(
     status: str = "",
     queue: str = "",
     mine: bool = False,
+    user: svc.Row = Depends(current_user),
     conn: Connection = Depends(get_conn),
 ) -> HTMLResponse:
-    user = current_user(request, conn)
     agent = svc.is_agent(user)
     status_enum = Status(status) if status in {s.value for s in Status} else None
     rows = svc.list_tickets(
@@ -231,8 +318,8 @@ def index(
         r["sla"] = svc.sla_status(r)
     return render(
         request,
-        conn,
         "list.html",
+        user,
         tickets=rows,
         counts=svc.status_counts(conn, None if agent else user["id"]),
         statuses=[s.value for s in Status],
@@ -244,11 +331,11 @@ def index(
 
 
 @app.get("/tickets/new", response_class=HTMLResponse, include_in_schema=False)
-def new_ticket_form(request: Request, conn: Connection = Depends(get_conn)) -> HTMLResponse:
+def new_ticket_form(request: Request, user: svc.Row = Depends(current_user)) -> HTMLResponse:
     return render(
         request,
-        conn,
         "new.html",
+        user,
         levels=[lv.value for lv in Level],
         categories=[c.value for c in Category],
         matrix=PRIORITY_MATRIX,
@@ -258,15 +345,14 @@ def new_ticket_form(request: Request, conn: Connection = Depends(get_conn)) -> H
 
 @app.post("/tickets", include_in_schema=False)
 def create_ticket_form(
-    request: Request,
     title: str = Form(""),
     description: str = Form(""),
     impact: str = Form("medium"),
     urgency: str = Form("medium"),
     category: str = Form(""),
+    user: svc.Row = Depends(current_user),
     conn: Connection = Depends(get_conn),
 ) -> RedirectResponse:
-    user = current_user(request, conn)
     try:
         data = TicketCreate.model_validate(
             {
@@ -286,16 +372,23 @@ def create_ticket_form(
 
 
 @app.get("/tickets/{ticket_id}", response_class=HTMLResponse, include_in_schema=False)
-def ticket_page(request: Request, ticket_id: int, conn: Connection = Depends(get_conn)) -> Response:
-    user = current_user(request, conn)
+def ticket_page(
+    request: Request,
+    ticket_id: int,
+    user: svc.Row = Depends(current_user),
+    conn: Connection = Depends(get_conn),
+) -> Response:
     try:
         detail = svc.ticket_detail(conn, ticket_id, viewer=user)
+    except svc.PermissionDenied as e:
+        # Refused outright, even for a guessed ticket number.
+        return render(request, "error.html", user, status_code=403, message=str(e))
     except svc.TicketError as e:
         return back("/", e)
     return render(
         request,
-        conn,
         "detail.html",
+        user,
         **detail,
         next_statuses=[s.value for s in svc.next_statuses(detail["ticket"], user)],
         agents=svc.list_users(conn, roles={"agent", "admin"}),
@@ -304,13 +397,12 @@ def ticket_page(request: Request, ticket_id: int, conn: Connection = Depends(get
 
 @app.post("/tickets/{ticket_id}/comment", include_in_schema=False)
 def comment_form(
-    request: Request,
     ticket_id: int,
     body: str = Form(""),
     internal: bool = Form(False),
+    user: svc.Row = Depends(current_user),
     conn: Connection = Depends(get_conn),
 ) -> RedirectResponse:
-    user = current_user(request, conn)
     try:
         svc.add_comment(
             conn, ticket_id, CommentCreate(author_id=user["id"], body=body, internal=internal)
@@ -325,13 +417,12 @@ def comment_form(
 
 @app.post("/tickets/{ticket_id}/transition", include_in_schema=False)
 def transition_form(
-    request: Request,
     ticket_id: int,
     to_status: str = Form(...),
     note: str = Form(""),
+    user: svc.Row = Depends(current_user),
     conn: Connection = Depends(get_conn),
 ) -> RedirectResponse:
-    user = current_user(request, conn)
     try:
         svc.transition(conn, ticket_id, user["id"], Status(to_status), note)
     except (svc.TicketError, ValueError) as e:
@@ -341,12 +432,11 @@ def transition_form(
 
 @app.post("/tickets/{ticket_id}/assign", include_in_schema=False)
 def assign_form(
-    request: Request,
     ticket_id: int,
     assignee_id: str = Form(""),
+    user: svc.Row = Depends(current_user),
     conn: Connection = Depends(get_conn),
 ) -> RedirectResponse:
-    user = current_user(request, conn)
     try:
         svc.assign(conn, ticket_id, user["id"], int(assignee_id) if assignee_id else None)
     except svc.TicketError as e:

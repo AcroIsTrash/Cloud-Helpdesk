@@ -43,7 +43,7 @@ phase; store model IDs in Parameter Store, not code.
 
 | Tech | Role | Why |
 |---|---|---|
-| Amazon Cognito (phase 2) | Login; Requester, Agent and Admin groups | Replaces the "Acting as" menu; managed, no password storage; app validates its JWTs itself, not the ALB (ADR-0012), and maps groups onto the existing permission rules. Phase 1 builds the seam first: one `current_user` dependency for HTML and API, no `actor_id` in request bodies, and a dev-only login picker. |
+| Amazon Cognito (phase 2) | Login; Requester, Agent and Admin groups | Replaces the dev login picker; managed, no password storage; app validates its JWTs itself, not the ALB (ADR-0012), and maps groups onto the existing permission rules. Phase 1 builds the seam first: one `current_user` dependency for HTML and API, no `actor_id` in request bodies, and a dev-only login picker. |
 
 ## Compute and networking (us-east-1)
 

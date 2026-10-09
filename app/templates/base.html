@@ -45,6 +45,10 @@
   nav a { color: var(--bar-text); font-size: 14px; font-weight: 500; }
   header .muted { color: var(--bar-muted); }
   header select { background: var(--bar); color: var(--bar-text); border-color: var(--bar-line); color-scheme: dark; }
+  header .who { display: flex; align-items: center; gap: 12px; }
+  header button.link { background: none; border: 1px solid var(--bar-line); color: var(--bar-text);
+                       padding: 3px 10px; font-weight: 500; font-size: 13px; }
+  header button.link:hover { border-color: var(--bar-muted); }
   main { max-width: 1180px; margin: 24px auto; padding: 0 24px; }
   h1 { font-weight: 600; letter-spacing: -.005em; }
   select, input, textarea, button { font: inherit; color: var(--text); }
@@ -90,23 +94,17 @@
 <body>
 <header>
   <a href="/" class="brand">Help Desk</a>
+  {% if current_user %}
   <nav>
     <a href="/">Tickets</a>
     <a href="/tickets/new">New ticket</a>
     <a href="/docs">API docs</a>
   </nav>
-  <form method="post" action="/act-as">
-    <input type="hidden" name="next" value="{{ request.url.path }}">
-    <label class="muted">Acting as
-      <select name="user_id" onchange="this.form.submit()">
-        {% for u in users %}
-        <option value="{{ u.id }}" {% if u.id == current_user.id %}selected{% endif %}>
-          {{ u.name }} ({{ u.role }}{% if u.queue %}, {{ u.queue }}{% endif %})
-        </option>
-        {% endfor %}
-      </select>
-    </label>
+  <form method="post" action="/logout" class="who">
+    <span class="muted">{{ current_user.name }} ({{ current_user.role }}{% if current_user.queue %}, {{ current_user.queue }}{% endif %})</span>
+    <button type="submit" class="link">Log out</button>
   </form>
+  {% endif %}
 </header>
 <main>
   {% if error %}<div class="error">{{ error }}</div>{% endif %}

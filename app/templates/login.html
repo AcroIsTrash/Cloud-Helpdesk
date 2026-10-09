@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Log in · Help Desk{% endblock %}
+{% block content %}
+<style>
+  .login { max-width: 520px; margin: 40px auto; }
+  .login h1 { margin-top: 0; }
+  .login label { display: block; margin-bottom: 6px; font-weight: 500; }
+  .login select { width: 100%; margin-bottom: 16px; }
+</style>
+<div class="card login">
+  <h1>Log in</h1>
+  {% if picker %}
+  <p class="muted">Development login: pick who to be. Phase 2 replaces this with Cognito,
+    and the app refuses to start with the picker enabled in AWS.</p>
+  <form method="post" action="/login">
+    <input type="hidden" name="next" value="{{ next }}">
+    <label for="user_id">Person</label>
+    <select id="user_id" name="user_id" required>
+      {% for u in people %}
+      <option value="{{ u.id }}">{{ u.name }} ({{ u.role }}{% if u.queue %}, {{ u.queue }}{% endif %})</option>
+      {% endfor %}
+    </select>
+    <button type="submit">Log in</button>
+  </form>
+  {% else %}
+  <p>No login method is configured. For local development, set
+    <code class="mono">HELPDESK_DEV_LOGIN=1</code> to enable the login picker.</p>
+  {% endif %}
+</div>
+{% endblock %}

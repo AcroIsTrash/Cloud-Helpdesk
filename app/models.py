@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import timedelta
 from enum import Enum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class Status(str, Enum):
@@ -96,29 +96,43 @@ ALL_QUEUES = sorted(set(QUEUE_FOR_CATEGORY.values()))
 
 
 # ---- API request schemas -------------------------------------------------
+# Who is acting never comes from a request body: it is the logged-in person.
 
 
-class TicketCreate(BaseModel):
+class _Body(BaseModel):
+    # Unknown fields are refused (422), so an old client still sending
+    # `actor_id` fails loudly instead of being silently re-attributed.
+    model_config = ConfigDict(extra="forbid")
+
+
+class TicketRequest(_Body):
     title: str = Field(min_length=5, max_length=120)
     description: str = Field(min_length=10, max_length=5000)
-    requester_id: int
     impact: Level = Level.MEDIUM
     urgency: Level = Level.MEDIUM
     category: Category | None = None  # None = let the router decide
 
 
-class CommentCreate(BaseModel):
-    author_id: int
+class CommentRequest(_Body):
     body: str = Field(min_length=1, max_length=5000)
     internal: bool = False  # internal notes are hidden from the requester
 
 
-class TransitionRequest(BaseModel):
-    actor_id: int
+class TransitionRequest(_Body):
     to_status: Status
     note: str | None = None
 
 
-class AssignRequest(BaseModel):
-    actor_id: int
+class AssignRequest(_Body):
     assignee_id: int | None  # None = unassign
+
+
+# ---- service inputs: a request plus who is making it ----------------------
+
+
+class TicketCreate(TicketRequest):
+    requester_id: int
+
+
+class CommentCreate(CommentRequest):
+    author_id: int
